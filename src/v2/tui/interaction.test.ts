@@ -8,8 +8,11 @@ import {
   interactionReducer,
   textTargetOf,
   visibleMessage,
+  type InteractionEvent,
   type InteractionState,
 } from "./interaction.ts"
+import { normalEntries, type KeyContext } from "./keymap.ts"
+import { PANE_ORDER } from "./panefocus.ts"
 
 const reduce = (state: InteractionState, event: Parameters<typeof interactionReducer>[1]) => {
   const result = interactionReducer(state, event)
@@ -611,4 +614,168 @@ test("focus intents address each editor type so every field can be focused direc
     assert.ok(intent, `${target} emits a focus intent`)
     assert.equal((intent as { target?: string }).target ?? "composer", target)
   }
+})
+
+/**
+ * Ticket #259: the keyboard-only reachability matrix. Every row names a
+ * catalog action, the context that owns it, and the pure state transition the
+ * keyboard handler feeds the reducer. Rows without events are app-level
+ * actions whose binding is the reachability proof (the adapter owns the RPC).
+ */
+type ReachRow = {
+  name: string
+  context: KeyContext
+  action: string
+  state?: Partial<InteractionState>
+  events?: InteractionEvent[]
+  expect?: Partial<InteractionState>
+}
+
+const KEYBOARD_MATRIX: readonly ReachRow[] = [
+  { name: "pane left", context: "pane", action: "pane.left", state: { focus: "chat", pane: "chat" }, events: [{ type: "pane.move", direction: "left" }], expect: { focus: "agents", paneMode: "select" } },
+  { name: "pane right", context: "pane", action: "pane.right", state: { focus: "agents" }, events: [{ type: "pane.move", direction: "right" }], expect: { focus: "chat", paneMode: "select" } },
+  { name: "pane down", context: "pane", action: "pane.down", state: { focus: "agents" }, events: [{ type: "pane.move", direction: "down" }], expect: { focus: "workspaces", paneMode: "select" } },
+  { name: "pane up", context: "pane", action: "pane.up", state: { focus: "workspaces" }, events: [{ type: "pane.move", direction: "up" }], expect: { focus: "agents", paneMode: "select" } },
+  { name: "pane enter", context: "pane", action: "pane.enter", state: { focus: "work", pane: "work" }, events: [{ type: "pane.enter" }], expect: { focus: "work", paneMode: "interact" } },
+  { name: "pane compose", context: "pane", action: "pane.compose", state: { focus: "chat", pane: "chat" }, events: [{ type: "pane.compose" }], expect: { focus: "composer", paneMode: "interact" } },
+  { name: "pane approvals", context: "pane", action: "pane.approvals" },
+  { name: "tab next", context: "pane", action: "focus.tab", state: { focus: "agents" }, events: [{ type: "pane.cycle", direction: 1 }], expect: { focus: "workspaces", paneMode: "select" } },
+  { name: "tab previous", context: "pane", action: "focus.shift.tab", state: { focus: "agents" }, events: [{ type: "pane.cycle", direction: -1 }], expect: { focus: "approvals", paneMode: "select" } },
+  { name: "roster open", context: "roster", action: "open", state: { focus: "agents" }, events: [{ type: "pane.enter" }], expect: { focus: "agents", paneMode: "interact" } },
+  { name: "roster filter", context: "roster", action: "filter" },
+  { name: "roster leader", context: "roster", action: "leader" },
+  { name: "chat compose", context: "chat", action: "compose.alt", state: { focus: "chat", pane: "chat" }, events: [{ type: "pane.compose" }], expect: { focus: "composer", paneMode: "interact" } },
+  { name: "chat search", context: "chat", action: "chat.filter" },
+  { name: "chat approvals", context: "chat", action: "chat.approvals" },
+  { name: "work open", context: "work", action: "work.open", state: { focus: "work", pane: "work" }, events: [{ type: "pane.enter" }], expect: { focus: "work", paneMode: "interact" } },
+  { name: "work delegate", context: "work", action: "work.delegate" },
+  { name: "work approvals", context: "work", action: "work.approvals" },
+  { name: "settings field", context: "settings", action: "settings.edit", state: { overlay: "settings", focus: "settings" }, events: [{ type: "settings.field.open" }], expect: { overlay: "settings", focus: "settings", field: "settings" } },
+  { name: "settings close", context: "settings", action: "settings.escape", state: { overlay: "settings", focus: "settings" }, events: [{ type: "overlay.set", overlay: "none" }], expect: { overlay: "none" } },
+  { name: "wizard field", context: "wizard", action: "wizard.activate", state: { overlay: "wizard" }, events: [{ type: "field.enter", target: "wizard" }], expect: { overlay: "wizard", field: "wizard" } },
+  { name: "wizard cancel", context: "wizard", action: "wizard.cancel", state: { overlay: "wizard" }, events: [{ type: "escape" }], expect: { overlay: "wizard" } },
+  { name: "approvals enter", context: "approvals", action: "approvals.resolve", state: { focus: "approvals", pane: "approvals" }, events: [{ type: "pane.enter" }], expect: { focus: "approvals", paneMode: "interact" } },
+  { name: "approvals close", context: "approvals", action: "approvals.close", state: { focus: "approvals", pane: "approvals", paneMode: "interact" }, events: [{ type: "escape" }], expect: { focus: "approvals", paneMode: "select" } },
+  { name: "help close", context: "help", action: "help.close", state: { overlay: "help" }, events: [{ type: "escape" }], expect: { overlay: "none" } },
+  { name: "command open", context: "command", action: "command.run", events: [{ type: "command.open", kind: ":" }], expect: { mode: "command" } },
+  { name: "command cancel", context: "command", action: "command.cancel", state: { mode: "command", command: { kind: ":", text: "", cursor: 0, returnMode: "normal" } }, events: [{ type: "escape" }], expect: { mode: "normal", command: null } },
+  { name: "composer insert", context: "composerInsert", action: "composerInsert.enter", events: [{ type: "insert.enter" }], expect: { mode: "insert", focus: "composer" } },
+  { name: "composer normal", context: "composerNormal", action: "composerNormal.escape", state: { mode: "insert", focus: "composer" }, events: [{ type: "escape" }], expect: { mode: "normal", focus: "composer" } },
+  { name: "composer visual", context: "composerVisual", action: "composerVisual.escape", state: { mode: "visual", focus: "composer", selection: { kind: "char", anchor: 0, cursor: 1 } }, events: [{ type: "escape" }], expect: { mode: "normal", focus: "composer", selection: null } },
+  { name: "confirm accept", context: "confirm", action: "confirm.accept" },
+  { name: "picker cancel", context: "picker", action: "picker.cancel" },
+  { name: "result close", context: "result", action: "result.close.escape" },
+]
+
+test("ticket259: every keyboard matrix action has a catalog binding and a reachable state", () => {
+  for (const row of KEYBOARD_MATRIX) {
+    const binding = normalEntries(row.context).find((entry) => entry.id === row.action)
+    assert.ok(binding, `${row.name}: ${row.context} binds ${row.action}`)
+    assert.ok(binding.keys.length > 0, `${row.name}: ${row.action} has a key sequence`)
+    if (!row.events) continue
+    let state = initialInteractionState(row.state)
+    for (const event of row.events) state = reduce(state, event).state
+    for (const [key, value] of Object.entries(row.expect ?? {})) {
+      assert.deepEqual((state as Record<string, unknown>)[key], value, `${row.name}: ${key} is reachable from the keyboard`)
+    }
+  }
+})
+
+test("ticket259: the Esc ladder exits every context without a focus trap", () => {
+  const starts: Array<{ name: string; state: InteractionState }> = [
+    { name: "initial roster", state: initialInteractionState() },
+    ...PANE_ORDER.map((pane) => ({ name: `${pane} select`, state: initialInteractionState({ focus: pane, pane, paneMode: "select" as const }) })),
+    ...PANE_ORDER.map((pane) => ({ name: `${pane} interact`, state: initialInteractionState({ focus: pane, pane, paneMode: "interact" as const }) })),
+    { name: "composer insert", state: initialInteractionState({ mode: "insert", focus: "composer", pane: "chat", paneMode: "interact" }) },
+    { name: "settings field", state: initialInteractionState({ mode: "insert", overlay: "settings", focus: "settings", field: "settings" }) },
+    { name: "wizard field", state: initialInteractionState({ mode: "insert", overlay: "wizard", field: "wizard" }) },
+    { name: "dialog field", state: initialInteractionState({ mode: "insert", overlay: "dialog", field: "prompt" }) },
+    { name: "help", state: initialInteractionState({ overlay: "help" }) },
+    { name: "logs", state: initialInteractionState({ overlay: "logs" }) },
+    { name: "command", state: initialInteractionState({ mode: "command", command: { kind: "/", text: "x", cursor: 1, returnMode: "normal" } }) },
+    { name: "visual", state: initialInteractionState({ mode: "visual", focus: "composer", selection: { kind: "line", anchor: 0, cursor: 1 } }) },
+  ]
+
+  for (const start of starts) {
+    let state = start.state
+    const seen = new Set<string>()
+    let terminal: ReturnType<typeof reduce> | undefined
+    for (let step = 0; step < 16; step++) {
+      const key = JSON.stringify(state)
+      assert.ok(!seen.has(key), `${start.name}: Esc revisits a state and traps focus at ${key}`)
+      seen.add(key)
+      const next = reduce(state, { type: "escape" })
+      if (JSON.stringify(next.state) === key) {
+        terminal = next
+        break
+      }
+      state = next.state
+    }
+    assert.ok(terminal, `${start.name}: Esc reaches a fixed point`)
+    const adapterOwned = terminal.intents.some((intent) => intent.type === "wizard-cancel")
+    if (adapterOwned) {
+      assert.equal(terminal.state.overlay, "wizard", `${start.name}: only the wizard confirmation owns the fixed point`)
+      continue
+    }
+    assert.ok(terminal.intents.every((intent) => intent.type === "noop"), `${start.name}: the fixed point is an idle no-op`)
+    assert.equal(terminal.state.overlay, "none", `${start.name}: no overlay traps Esc`)
+    assert.equal(terminal.state.field, null, `${start.name}: no field traps Esc`)
+    assert.equal(terminal.state.command, null, `${start.name}: no command traps Esc`)
+    assert.equal(terminal.state.selection, null, `${start.name}: no selection traps Esc`)
+  }
+})
+
+test("ticket259: every keyboard context has an escape or close binding", () => {
+  const exits: ReadonlyArray<readonly [KeyContext, string]> = [
+    ["pane", "pane.escape"],
+    ["roster", "escape"],
+    ["chat", "escape"],
+    ["work", "escape"],
+    ["settings", "settings.escape"],
+    ["wizard", "wizard.cancel"],
+    ["picker", "picker.cancel"],
+    ["confirm", "confirm.reject.escape"],
+    ["result", "result.close.escape"],
+    ["approvals", "approvals.close"],
+    ["help", "help.close"],
+    ["command", "command.cancel"],
+    ["composerInsert", "composerInsert.escape"],
+    ["composerNormal", "composerNormal.escape"],
+    ["composerVisual", "composerVisual.escape"],
+    ["wizardField", "wizardField.escape"],
+    ["wizardText", "wizardText.escape"],
+    ["wizardMemory", "wizardMemory.list"],
+    ["promptField", "promptField.escape"],
+    ["promptText", "promptText.escape"],
+    ["settingsField", "settingsField.escape"],
+    ["settingsText", "settingsText.escape"],
+    ["settingsMemoryField", "settingsMemoryField.escape"],
+    ["settingsMemoryText", "settingsMemoryText.escape"],
+    ["filter", "filter.cancel"],
+    ["search", "search.clear"],
+    ["completion", "completion.close"],
+  ]
+  for (const [context, action] of exits) {
+    assert.ok(normalEntries(context).some((entry) => entry.id === action), `${context} exposes ${action}`)
+  }
+})
+
+test("ticket259: Tab cycles every visible pane and returns to the start", () => {
+  const visible = { agents: true, workspaces: true, chat: true, work: true, approvals: true }
+  let state = initialInteractionState()
+  const visited = new Set([state.pane])
+  for (let step = 0; step < PANE_ORDER.length; step++) {
+    state = reduce(state, { type: "pane.cycle", direction: 1, visible }).state
+    visited.add(state.pane)
+  }
+  assert.equal(state.pane, "agents", "one full Tab cycle returns to the starting pane")
+  assert.deepEqual([...visited].sort(), [...PANE_ORDER].sort(), "Tab visits every visible pane")
+  assert.equal(state.paneMode, "select", "Tab never enters a pane")
+
+  let hidden = initialInteractionState({ focus: "chat", pane: "chat" })
+  for (let step = 0; step < 3; step++) {
+    hidden = reduce(hidden, { type: "pane.cycle", direction: 1, visible: { work: false, approvals: false } }).state
+    assert.ok(hidden.pane !== "work" && hidden.pane !== "approvals", "Tab skips hidden panes")
+  }
+  assert.equal(hidden.pane, "chat", "a hidden-pane cycle still returns to the start")
 })

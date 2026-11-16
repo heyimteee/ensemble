@@ -1,5 +1,10 @@
 import { Plugin } from "@opencode/plugin"
+import { assertSupportedNode } from "./node-version.ts"
 import { sharedEnsemble } from "./shared-service.ts"
+
+// Ticket #258: fail at plugin load with the supported Node range instead of a
+// downstream API error. `engines.node` still warns at install time.
+assertSupportedNode()
 
 export default Plugin.define({
   id: "ensemble.v2",

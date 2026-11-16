@@ -1,0 +1,101 @@
+name: Nightly
+
+# Ticket #261: the expensive, environment-sensitive checks are separate from
+# PR feedback. `latency-reference` is the strict 50/250 ms reference-host gate;
+# `real` is the real-model acceptance and only runs when opted in through the
+# `real` dispatch input or the repository variable ENSEMBLE_NIGHTLY_REAL=1.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      real:
+        description: Run the real-model suite against the runner's configured model catalog
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "26.12.1"
+  # Keep aligned with SUPPORTED_OPENCODE_VERSIONS in
+  # src/v2/host-compatibility.ts. The compatibility matrix covers 2.2.6 and
+  # 2.2.7; the nightly reference host runs the latest tested host.
+  OPENCODE_VERSION: "2.2.7"
+  FD_VERSION: "10.2.0"
+
+jobs:
+  latency-reference:
+    name: latency-reference
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ENSEMBLE_LIVE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/live-host
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          opencode-version: ${{ env.OPENCODE_VERSION }}
+          fd-version: ${{ env.FD_VERSION }}
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:preflight
+      - name: Reference-host latency budget
+        env:
+          ENSEMBLE_LATENCY_PROFILE: reference
+          ENSEMBLE_LATENCY_SAMPLES: "20"
+          ENSEMBLE_LATENCY_CARD_SAMPLES: "10"
+          ENSEMBLE_LATENCY_OUT: ${{ runner.temp }}/ensemble-live-artifacts/latency-result.json
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:latency
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-reference-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  real:
+    name: real
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.real == 'true') || vars.ENSEMBLE_NIGHTLY_REAL == '1' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ENSEMBLE_LIVE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/live-host
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          opencode-version: ${{ env.OPENCODE_VERSION }}
+          fd-version: ${{ env.FD_VERSION }}
+      - name: Preflight live host tools (all)
+        env:
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:preflight -- all
+      - name: Real-model acceptance
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
+          retention-days: 7

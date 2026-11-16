@@ -1,10 +1,13 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
+
+import { FLAKE_BUDGET } from "./flake-policy.ts"
+import { decideFailedAttempt } from "./live-matrix.ts"
 
 const matrix = fileURLToPath(new URL("../../scripts/live-matrix.sh", import.meta.url))
 const harness = fileURLToPath(new URL("../../scripts/lib/live-harness.sh", import.meta.url))
@@ -52,6 +55,24 @@ test("the matrix creates its temp root on a clean host", () => {
   }
 })
 
+test("the matrix runs every scenario in order through its public CLI", () => {
+  const box = sandbox()
+  try {
+    const result = spawnSync(bash, [matrix, "all"], {
+      encoding: "utf8",
+      env: environment(box),
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const fake = result.stdout.search(/SKIP {2}fake\b/)
+    const empty = result.stdout.search(/SKIP {2}fake-empty\b/)
+    const real = result.stdout.search(/SKIP {2}real\b/)
+    assert.ok(fake >= 0 && empty > fake && real > empty, "the matrix keeps the declared scenario order")
+    assert.match(result.stdout, /3 skipped/)
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
 test("the harness skip is a structural marker, not log text", () => {
   const box = sandbox()
   try {
@@ -89,6 +110,196 @@ test("the matrix treats a required skip as a failure", () => {
     assert.match(result.stdout, /FAIL {2}fake\b/)
     assert.match(result.stdout, /NOT RUN fake-empty/)
     assert.doesNotMatch(result.stdout, /0 failed/)
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
+test("only a timing failure may retry, and the budget comes from the flake policy", () => {
+  assert.equal(decideFailedAttempt({ classification: "timing", attempt: 1 }).outcome, "retry")
+  assert.equal(
+    decideFailedAttempt({ classification: "timing", attempt: FLAKE_BUDGET.maxRetriesPerSuite }).outcome,
+    "retry",
+    "the retry ceiling is the flake budget, not a second literal",
+  )
+  assert.equal(
+    decideFailedAttempt({ classification: "timing", attempt: FLAKE_BUDGET.maxRetriesPerSuite + 1 }).outcome,
+    "fail",
+    "a timing retry past the budget fails",
+  )
+})
+
+test("product, unknown, and infrastructure failures always fail, even when quarantined", () => {
+  for (const classification of ["product", "unknown", "infrastructure"] as const) {
+    assert.equal(decideFailedAttempt({ classification, attempt: 1 }).outcome, "fail")
+    assert.equal(
+      decideFailedAttempt({ classification, attempt: 1, quarantined: true }).outcome,
+      "fail",
+      `${classification} must never be masked by a quarantine`,
+    )
+  }
+})
+
+test("a quarantined timing failure is quarantined, never passed or retried", () => {
+  const decision = decideFailedAttempt({ classification: "timing", attempt: 1, quarantined: true })
+  assert.equal(decision.outcome, "quarantine")
+  assert.notEqual(decision.outcome, "pass")
+  assert.match(decision.reason, /quarantined/)
+})
+
+test("a failed attempt writes a classified record and redacted pane/log artifacts", () => {
+  const box = sandbox()
+  try {
+    const artifacts = join(box.root, "artifacts")
+    const command = [
+      'source "$1"',
+      'live_setup "artifact"',
+      'LIVE_FAILURE_KIND=timing',
+      'printf "server listening on http://127.0.0.1:1\\npath=%s\\n" "$LIVE_BASE" > "$LIVE_LOGS/server.log"',
+      'live_fail_timing "typed text did not reach the TUI: AlignProbe"',
+    ].join("; ")
+    const result = spawnSync(bash, ["-c", command, "--", harness], {
+      encoding: "utf8",
+      env: environment(box, {
+        ENSEMBLE_LIVE_ARTIFACTS: artifacts,
+        ENSEMBLE_LIVE_SUITE: "fake",
+        ENSEMBLE_LIVE_ATTEMPT: "1",
+      }),
+    })
+    assert.notEqual(result.status, 0)
+    const record = JSON.parse(readFileSync(join(artifacts, "failure.json"), "utf8"))
+    assert.equal(record.suite, "fake")
+    assert.equal(record.attempt, 1)
+    assert.equal(record.kind, "timing")
+    assert.match(record.message, /typed text did not reach the TUI/)
+    const log = readFileSync(join(artifacts, "logs", "server.log"), "utf8")
+    assert.match(log, /<live-base>/, "the live base path is redacted")
+    assert.doesNotMatch(log, new RegExp(box.tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
+function reducedMotionFrame(box: Sandbox, pane: string): number | null {
+  const result = spawnSync(
+    bash,
+    [
+      "-c",
+      'source "$1"; PANE="$2"; live_capture() { cat "$PANE"; }; live_capture_reduced_motion_frame0 probe FAKEAGENT WORKING "#LiveSite"',
+      "--",
+      harness,
+      pane,
+    ],
+    { encoding: "utf8", env: environment(box) },
+  )
+  return result.status
+}
+
+test("the reduced-motion frame asserts the Ensemble card, not host chrome", () => {
+  const box = sandbox()
+  try {
+    const still = join(box.root, "still.txt")
+    writeFileSync(
+      still,
+      [
+        "│  FAKEAGENT   hops 0/8 · cmd 24 left ⠋ WORKING │",
+        "│  #LiveSite ⠋1 ●1 │",
+        " Message sent                              ⠏ Finishing startup…",
+        "",
+      ].join("\n"),
+    )
+    assert.equal(
+      reducedMotionFrame(box, still),
+      0,
+      "a host footer spinner does not turn the Ensemble still frame into a failure",
+    )
+
+    const animated = join(box.root, "animated.txt")
+    writeFileSync(
+      animated,
+      [
+        "│  FAKEAGENT   hops 0/8 · cmd 24 left ⠏ WORKING │",
+        "│  #LiveSite ⠋1 ●1 │",
+        "",
+      ].join("\n"),
+    )
+    assert.notEqual(
+      reducedMotionFrame(box, animated),
+      0,
+      "a non-zero Work-card frame still fails under reduced motion",
+    )
+
+    const animatedRail = join(box.root, "animated-rail.txt")
+    writeFileSync(
+      animatedRail,
+      [
+        "│  FAKEAGENT   hops 0/8 · cmd 24 left ⠋ WORKING │",
+        "│  #LiveSite ⠏1 ●1 │",
+        "",
+      ].join("\n"),
+    )
+    assert.notEqual(
+      reducedMotionFrame(box, animatedRail),
+      0,
+      "a non-zero rail busy frame still fails under reduced motion",
+    )
+
+    const missing = join(box.root, "missing.txt")
+    writeFileSync(missing, "│  Nothing active yet │\n")
+    assert.notEqual(reducedMotionFrame(box, missing), 0, "the assertion needs a visible Work card")
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
+function captureChatHeader(box: Sandbox, pane: string): number | null {
+  const result = spawnSync(
+    bash,
+    [
+      "-c",
+      'source "$1"; LIVE_NODE_BIN="$2"; PANE="$3"; live_capture() { cat "$PANE"; }; live_chat_columns() { printf "%s\\n" "1 80"; }; live_chat_header_contains "$4" "leader FakeAgent"',
+      "--",
+      harness,
+      process.execPath,
+      pane,
+      "fixture",
+    ],
+    { encoding: "utf8", env: environment(box) },
+  )
+  return result.status
+}
+
+test("the group header assertion joins a wrapped title but ignores transcript rows", () => {
+  const box = sandbox()
+  try {
+    const wrapped = join(box.root, "wrapped.txt")
+    writeFileSync(
+      wrapped,
+      ["#LiveSite │ /tmp/project │ leader", "FakeAgent", "", "→ Assigned to $Helper: transcript row", ""].join("\n"),
+    )
+    assert.equal(captureChatHeader(box, wrapped), 0, "a wrapped header names the leader and leader agent")
+
+    const missingAgent = join(box.root, "missing-agent.txt")
+    writeFileSync(
+      missingAgent,
+      ["#LiveSite │ /tmp/project │ leader", "", "→ Assigned to $FakeAgent: leader FakeAgent elsewhere", ""].join("\n"),
+    )
+    assert.notEqual(
+      captureChatHeader(box, missingAgent),
+      0,
+      "a missing header leader agent cannot be satisfied by a transcript row",
+    )
+
+    const missingLeader = join(box.root, "missing-leader.txt")
+    writeFileSync(
+      missingLeader,
+      ["#LiveSite │ /tmp/project │ leader Helper", "", "→ Assigned to $FakeAgent: transcript row", ""].join("\n"),
+    )
+    assert.notEqual(
+      captureChatHeader(box, missingLeader),
+      0,
+      "a header naming a different leader does not pass",
+    )
   } finally {
     rmSync(box.root, { recursive: true, force: true })
   }

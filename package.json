@@ -25,6 +25,8 @@
     "test:live:fake:all": "bash scripts/live-matrix.sh fake",
     "test:live:all": "bash scripts/live-matrix.sh all",
     "test:live:latency": "bash scripts/live-latency-probe.sh",
+    "test:live:latency:reference": "ENSEMBLE_LATENCY_PROFILE=reference bash scripts/live-latency-probe.sh",
+    "latency:budget": "node --experimental-strip-types scripts/latency-budget.mjs",
     "test:live:sizes": "bash scripts/live-size-matrix.sh",
     "test:live:lifecycle": "bash scripts/live-lifecycle-fake.sh",
     "test:live:subagent": "bash scripts/live-subagent-probe.sh",
@@ -36,13 +38,14 @@
     "test:live:tool-surface": "bash scripts/live-tool-surface-benchmark.sh",
     "test:live:multilocation": "bash scripts/live-multilocation.sh",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
-    "logs:summary": "node scripts/log-summary.mjs"
+    "logs:summary": "node scripts/log-summary.mjs",
+    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs"
   },
   "engines": {
-    "node": ">=26.4.0"
+    "node": ">=22.23.4"
   },
   "peerDependencies": {
-    "@opencode/plugin": "2.2.1",
+    "@opencode/plugin": "2.2.6 || 2.2.7",
     "@opentui/core": ">=0.7.0",
     "@opentui/solid": ">=0.7.0",
     "solid-js": ">=1.9.0"

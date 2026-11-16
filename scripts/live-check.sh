@@ -190,6 +190,9 @@ if [[ "$MODELS" -gt 0 ]]; then
 
   live_key "$LIVE_TUI_SESSION" "i"
   live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
+  # Composer content is read from the composer box's joined rows: the chat
+  # cell wraps long drafts, and a wrap splits a literal across two rows.
+  # Palette rows are one row by construction and keep plain pane assertions.
   live_type "$LIVE_TUI_SESSION" "A long message that wraps across the composer width before opening a completion. "
   live_type "$LIVE_TUI_SESSION" '$'
   live_require_text "$LIVE_TUI_SESSION" '$ agents' 10 "inline agent completion"
@@ -202,7 +205,9 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_require_text "$LIVE_TUI_SESSION" "handover.md" 10 "untracked file completion result"
   live_key "$LIVE_TUI_SESSION" Enter
   live_type "$LIVE_TUI_SESSION" "the git log"
-  live_require_text "$LIVE_TUI_SESSION" "@handover.md the git log" 10 "the sentence after @file is preserved"
+  # The draft fills several composer rows, so the suffix can wrap between
+  # `the git` and `log`; the whole suffix after the selection must still exist.
+  live_require_composer_text "$LIVE_TUI_SESSION" "@handover.md the git log" 10 "the sentence after @file is preserved"
   live_require_absence "$LIVE_TUI_SESSION" '@ files' 10 "the file palette closed on selection"
   # Escaped-space paths use the same grammar on the client and server.
   clear_composer_text
@@ -210,7 +215,7 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_require_text "$LIVE_TUI_SESSION" "docs/my notes" 10 "escaped space is part of the query"
   live_require_text "$LIVE_TUI_SESSION" "docs/my notes.md" 10 "spaced file completion result"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_text "$LIVE_TUI_SESSION" '@docs/my\ notes.md' 10 "escaped spaced path inserted"
+  live_require_composer_text "$LIVE_TUI_SESSION" '@docs/my\ notes.md' 10 "escaped spaced path inserted"
   # A cursor inside the token edits the query and selection preserves the
   # suffix after the token.
   clear_composer_text
@@ -221,12 +226,16 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" BSpace
   live_require_text "$LIVE_TUI_SESSION" "@ files │ hand" 10 "the mid-token query follows the edit"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_text "$LIVE_TUI_SESSION" "before @handover.md after" 10 "selection preserves the suffix"
+  live_require_composer_text "$LIVE_TUI_SESSION" "before @handover.md after" 10 "selection preserves the suffix"
   # The same escaped path reaches the server parser.
   clear_composer_text
   live_type "$LIVE_TUI_SESSION" '@docs/my\ notes.md real-parser-check'
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_joined_text "$LIVE_TUI_SESSION" '→ Assigned to $LiveAgent: @docs/my\ notes.md real-parser-check' 20 "escaped spaced reference reaches the server parser"
+  # The reply line wraps inside the hyphenated `real-parser-check` word at the
+  # widened chat width, and the row join inserts a space there. Match the
+  # joined rows with that one optional space; every other token must match and
+  # a missing suffix still fails.
+  live_require_joined_matches "$LIVE_TUI_SESSION" '→ Assigned to \$LiveAgent: @docs/my\\ notes\.md real-parser- ?check' 20 "escaped spaced reference reaches the server parser"
   # Agent mention plus the send path.
   clear_composer_text
   live_type "$LIVE_TUI_SESSION" '$'

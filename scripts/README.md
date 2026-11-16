@@ -1,6 +1,19 @@
 # Live TUI verification
 
-Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available:
+Run from the repository with Node 22.23.4+, OpenCode, tmux, Git, and curl available:
+
+Flake policy: `scripts/live-matrix.sh` retries a failed suite at most once, and
+only when the harness classified the failure as a TUI timing failure. Product,
+unknown, and infrastructure failures never retry. Every attempt is recorded in
+`flake-records.jsonl`; the matrix prints `flake-report` rows with suite,
+attempt, classification, and artifact path, and writes `flake-report.json`
+beside the failure artifacts. A failure preserves redacted pane captures and
+logs under `ENSEMBLE_LIVE_ARTIFACTS` (CI uploads them). Quarantine entries in
+`scripts/flake-quarantine.json` require a linked issue and an owner, and they
+apply only to a classified timing failure; any product, unknown, or
+infrastructure failure still fails the run. The full budget and quarantine
+rules are in
+[docs/verification/flake-policy.md](../docs/verification/flake-policy.md).
 
 - `npm run test:live`: existing real-runtime acceptance (agent/workspace wizards,
   composer agent/file completions, sending, command palette, RPC deletion, help,
@@ -71,7 +84,7 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   and a real temp workspace. The scenario seeds a v5 contract, removes the
   persisted `nativeFirst` key from the isolated plugin store, restarts, and
   requires the effective mode to be `on` and the default to be persisted. It
-  then checks the generated v6 roster table, drives one leader native turn that
+  then checks the generated v7 roster table, drives one leader native turn that
   explicitly delegates one member and `$Name`-mentions several more, and
   asserts one work item per member, one `already-routed` suppression for the
   explicit recipient, no completion hop back to the leader, and one settlement.
@@ -110,13 +123,17 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   stalled/retrying labels remain service/TUI-seam tests because no public live
   RPC can inject those durable states; the script logs those skips. Expect
   about six minutes.
-- `npm run test:live:latency`: a reproducible keypress-to-repaint probe on the
-  isolated fake host. It reports min/p50/p95/max/mean and raw samples for the
-  grouped rail `j`/`k` navigation and for delegation-card appearance
-  (`task.delegate` RPC to the first capture showing the right-pane Work card
-  title); it is a measurement, not a pass/fail threshold. Set
-  `ENSEMBLE_LATENCY_SAMPLES` (default 10) for rail samples and
-  `ENSEMBLE_LATENCY_CARD_SAMPLES` (default 5) for card samples.
+- `npm run test:live:latency`: the latency budget probe on the isolated fake
+  host. It gates rail keypress p95 (50 ms reference) and the deterministic
+  patch-card p95 (250 ms reference), and reports first-token only. The
+  patch-card fixture reads the durable `changes.since` patch and renders the
+  real Work-card mapping without waiting for a model token. The default
+  `smoke` profile uses generous PR thresholds; `npm run
+  test:live:latency:reference` runs the strict reference gate.
+  `ENSEMBLE_LATENCY_SAMPLES` (default 10) and
+  `ENSEMBLE_LATENCY_CARD_SAMPLES` (default 5) control the sample counts;
+  `ENSEMBLE_LATENCY_REGRESSION_MS` injects a deliberate regression that must
+  fail the gate. See [the budget policy](../docs/verification/latency-budget.md).
 - `npm run test:live:fake:empty`: same isolated fake provider, but configured
   with no models. Walks the New-agent wizard through the empty one-by-one
   memory list to the Main model step and asserts the explained empty state
@@ -166,18 +183,54 @@ retries. A failing scenario stops the run and later scenarios are reported as
 
 ## CI
 
-CI keeps the existing `verify` job (`npm ci` then `npm run verify`) and adds a
-`live` job on every push and pull request. The live job pins the host toolset:
-Ubuntu 24.04, Node 26.12.1 through `actions/setup-node`, OpenCode 2.2.6 through
-`npm install --global @opencode/cli@2.2.6`, the runner's `tmux`, and fd 10.2.0
-from its release archive. It then runs `npm run test:live:preflight` (fake
-scope), `npm run test:live:fake:all`, and
-`npm run test:live:multilocation`; all steps set `ENSEMBLE_LIVE_REQUIRE=1`. The
-preflight prints the resolved versions and fails if a required tool is missing
-or the pinned Node/OpenCode version differs. The fake/empty and multi-location
-suites do not use fd; the job still installs it so the same pinned toolset can
-validate the full local matrix with `npm run test:live:preflight -- all`.
-Real-model checks stay local and are never required in CI.
+PR feedback is split by cost; the expensive environment-sensitive checks are
+nightly. Every live job pins the same toolset through
+[`.github/actions/live-host`](../.github/actions/live-host/action.yml): Ubuntu
+24.04, Node 26.12.1, OpenCode 2.2.7 (the latest host in the compatibility
+matrix; `compatibility.yml` covers 2.2.6 and 2.2.7), the runner's `tmux`, fd
+10.2.0, and `npm ci`. Every live job sets `ENSEMBLE_LIVE_REQUIRE=1`, writes
+redacted artifacts to `$RUNNER_TEMP/ensemble-live-artifacts`, and uploads them
+on failure. The preflight prints the resolved versions and fails if a required
+tool is missing or the pinned Node/OpenCode version differs.
+
+### Pull request and push (`verify.yml`)
+
+| Job | Suites | Timeout | Observed |
+| --- | --- | ---: | ---: |
+| `verify` | `npm run verify` (typecheck + unit suite, including the CI job-graph check) | 15 min | ~1 min |
+| `live-fake` | `test:live:fake:all`, `test:live:sizes`, `test:live:lifecycle`, `test:live:subagent` | 45 min | ~17 min |
+| `live-native` | `test:live:native-first`, `test:live:vera`, `test:live:tool-surface` | 20 min | ~3 min |
+| `live-multilocation` | `test:live:multilocation` | 20 min | ~3 min |
+| `latency-smoke` | `test:live:latency` (`smoke` profile: 500 ms rail, 5000 ms card) | 20 min | ~3 min |
+
+The live jobs run in parallel after checkout, so the PR critical path is the
+longest live job plus tool setup: target 20 minutes, budget 30 minutes wall
+clock. The sum of job timeouts is 120 minutes; the deterministic suite sum is
+about 20 minutes on the local reference host (fake 8 min, lifecycle 6 min,
+sizes 1 min, multilocation 1 min, the native suites under 1 min, latency under
+1 min). The `live-fake` timeout is 45 minutes to absorb a slower shared runner
+without letting one job hang indefinitely.
+
+### Nightly (`nightly.yml`)
+
+| Job | Suites | Timeout | Observed |
+| --- | --- | ---: | ---: |
+| `latency-reference` | `test:live:latency` (`reference` profile: 50 ms rail, 250 ms card) | 30 min | ~3 min |
+| `real` | `test:live` with the real host catalog; opt-in via the `real` dispatch input or `ENSEMBLE_NIGHTLY_REAL=1` | 30 min | ~3 min |
+
+The schedule is `17 4 * * *`; `workflow_dispatch` allows a manual run. The
+real-model job is skipped unless opted in, so credentials and model cost stay
+controlled. Nightly wall-clock budget is 60 minutes with both jobs.
+
+### Kept separate
+
+`compatibility.yml` runs the host probe and deterministic fake smoke on
+OpenCode 2.2.6 and 2.2.7; `node-matrix.yml` runs `npm run verify` on Node
+22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs `npm run docs:check`. The old
+`latency.yml` is removed: the smoke profile lives in `verify.yml` and the
+reference gate in `nightly.yml`. `src/v2/ci-workflows.ts` and its test assert
+this job graph, the suite ownership, the timeouts, the artifact uploads, the
+`ENSEMBLE_LIVE_REQUIRE=1` contract, and the OpenCode pin.
 
 ## Skip versus fail
 
@@ -249,17 +302,35 @@ visual tests.
 ## Latency probe
 
 `npm run test:live:latency` starts the isolated fake provider, server, and TUI,
-creates one agent and one workspace through the RPC surface, then times rail
-`j`/`k` cursor moves from `tmux send-keys` until a pane capture first shows the
-cursor on the target row. It then opens the workspace and times `task.delegate`
-RPC invocations until the first capture shows the new Work card title. It
-reports raw samples plus min/p50/p95/max/mean and both measurement boundaries.
-`ENSEMBLE_LATENCY_SAMPLES` controls the rail sample count and
-`ENSEMBLE_LATENCY_CARD_SAMPLES` the card sample count.
+creates one agent and one workspace through the RPC surface, then measures:
 
-The number includes tmux send/capture overhead, so compare runs from the same
-machine and terminal host rather than treating it as pure render time. The
-probe measures and exits; it does not assert a latency threshold.
+- `rail`: rail `j`/`k` cursor moves from `tmux send-keys` until a pane capture
+  first shows the cursor on the target row. This includes tmux send/capture
+  overhead; compare runs from the same machine and terminal host.
+- `patchCard`: a deterministic headless fixture. It invokes `task.delegate`,
+  reads the durable `changes.since` patch after that version, applies the
+  subtask changes to a client-side state map, and renders the real
+  `workCardForTask` mapping. It never waits for a model token, so the fake
+  provider's hold cannot dominate the card number.
+- `firstToken`: the `task.delegate` RPC to the first visible model reply. It is
+  report only; a slow model is not a slow UI.
+
+The default `smoke` profile gates rail p95 at 500 ms and patch-card p95 at
+5000 ms for shared PR runners. The reference gate is strict:
+
+```sh
+ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:latency:reference
+ENSEMBLE_LATENCY_PROFILE=reference ENSEMBLE_LATENCY_SAMPLES=20 \
+  ENSEMBLE_LATENCY_CARD_SAMPLES=10 npm run test:live:latency
+```
+
+`ENSEMBLE_LATENCY_SAMPLES` controls the rail count and
+`ENSEMBLE_LATENCY_CARD_SAMPLES` the patch-card count.
+`ENSEMBLE_LATENCY_REGRESSION_MS=1000` adds a deliberate per-sample regression
+and must fail the reference gate. `ENSEMBLE_LATENCY_OUT` selects the result
+JSON path; CI uploads it with the redacted failure artifacts. The pure
+evaluator and profiles are documented in
+[docs/verification/latency-budget.md](../docs/verification/latency-budget.md).
 
 The fake provider is infrastructure only and is never imported by the plugin.
 It implements `/v1/models` and `/v1/chat/completions` (also without `/v1`).

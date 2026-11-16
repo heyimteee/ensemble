@@ -1,21 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproducible keypress-to-repaint latency probe.
+# Reproducible latency budget probe.
 #
-# Starts the isolated fake host (own HOME, XDG dirs, project, server, TUI),
-# creates one agent and one workspace, then times `j`/`k` on the rail cursor:
-# from `tmux send-keys` until a pane capture first shows the cursor on the
-# target row. The measurement crosses the same tmux boundary used by the live
-# checks, so it includes tmux send/capture overhead (roughly a few ms), not
-# just host render time.
+# Starts the isolated fake host (own HOME, XDG dirs, project, server, TUI) and
+# measures three separate things:
 #
-#   npm run test:live:latency
-#   ENSEMBLE_LATENCY_SAMPLES=20 npm run test:live:latency
+#   rail        tmux send-keys -> first capture showing the moved rail cursor
+#   patchCard   task.delegate RPC -> durable patch -> real Work-card render
+#   firstToken  task.delegate RPC -> first visible model reply (report only)
 #
-# This is a measurement, not a pass/fail gate. A missing prerequisite follows
-# the harness skip behavior; a scenario problem exits nonzero. The fixture
-# stays local and never calls a real model.
+# The patch-card fixture is headless and deterministic: it reads the durable
+# `changes.since` patch and renders the same pure `workCardForTask` mapping the
+# TUI uses. It never waits for a model token, so the fake provider's hold
+# cannot dominate the card number.
+#
+#   npm run test:live:latency                     # smoke profile (default)
+#   ENSEMBLE_LATENCY_PROFILE=reference npm run test:live:latency
+#   ENSEMBLE_LATENCY_SAMPLES=20 ENSEMBLE_LATENCY_CARD_SAMPLES=10 npm run test:live:latency
+#   ENSEMBLE_LATENCY_REGRESSION_MS=1000 npm run test:live:latency
+#
+# Profiles:
+#   reference  rail p95 <= 50ms, patch-card p95 <= 250ms (reference host/nightly)
+#   smoke      rail p95 <= 500ms, patch-card p95 <= 5000ms (PR runner)
+#   report     summarize only; never gate
+#
+# A missing prerequisite follows the harness skip behavior; a scenario problem
+# exits nonzero. The fixture stays local and never calls a real model.
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/lib/live-harness.sh"
@@ -27,6 +38,29 @@ live_setup "latency"
 SAMPLES="${ENSEMBLE_LATENCY_SAMPLES:-10}"
 if ! [[ "$SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
   live_fail "ENSEMBLE_LATENCY_SAMPLES must be a positive integer (got: $SAMPLES)"
+fi
+
+CARD_SAMPLES="${ENSEMBLE_LATENCY_CARD_SAMPLES:-5}"
+if ! [[ "$CARD_SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
+  live_fail "ENSEMBLE_LATENCY_CARD_SAMPLES must be a positive integer (got: $CARD_SAMPLES)"
+fi
+
+# The report-only fixture uses one unique model reply marker per run. A second
+# sample would match the first reply still visible in the transcript.
+FIRST_TOKEN_SAMPLES="${ENSEMBLE_LATENCY_FIRST_TOKEN_SAMPLES:-1}"
+if ! [[ "$FIRST_TOKEN_SAMPLES" =~ ^[01]$ ]]; then
+  live_fail "ENSEMBLE_LATENCY_FIRST_TOKEN_SAMPLES must be 0 or 1 (got: $FIRST_TOKEN_SAMPLES)"
+fi
+
+PROFILE="${ENSEMBLE_LATENCY_PROFILE:-smoke}"
+case "$PROFILE" in
+  reference|smoke|report) ;;
+  *) live_fail "ENSEMBLE_LATENCY_PROFILE must be reference, smoke, or report (got: $PROFILE)" ;;
+esac
+
+REGRESSION_MS="${ENSEMBLE_LATENCY_REGRESSION_MS:-0}"
+if ! [[ "$REGRESSION_MS" =~ ^[0-9]+$ ]]; then
+  live_fail "ENSEMBLE_LATENCY_REGRESSION_MS must be a non-negative integer (got: $REGRESSION_MS)"
 fi
 
 ENSEMBLE_LIVE_TUI_WIDTH="${ENSEMBLE_LIVE_TUI_WIDTH:-140}"
@@ -90,6 +124,8 @@ live_open_ensemble
 live_require_text "$LIVE_TUI_SESSION" "ProbeAgent" 15 "latency fixture agent row"
 live_require_text "$LIVE_TUI_SESSION" "#LatencyProbe" 15 "latency fixture workspace row"
 
+# --- rail keypress -> visible repaint -------------------------------------
+
 # Own the rail cursor explicitly; depending on restored history the page can
 # open on chat. Ticket #180: h selects Agents, Enter starts row navigation, and
 # the cursor mark renders only while the Agents pane owns interaction.
@@ -139,7 +175,7 @@ measure_key() {
     fi
     now=$(date +%s%N)
     if (( now - start > 10000000000 )); then
-      live_fail "rail did not repaint to '$marker' within 10s after '$key'"
+      live_fail_timing "rail did not repaint to '$marker' within 10s after '$key'"
     fi
   done
 }
@@ -159,79 +195,68 @@ for ((i = 0; i < SAMPLES; i++)); do
   fi
 done
 
-summary=$(
-  printf '%s\n' "${samples[@]}" | sort -n | awk '
-    { values[NR] = $1; total += $1 }
-    END {
-      n = NR
-      p50 = values[int((n + 1) / 2)]
-      p95 = values[int((n * 95 + 99) / 100)]
-      printf "min=%dms p50=%dms p95=%dms max=%dms mean=%.1fms n=%d", values[1], p50, p95, values[n], total / n, n
-    }
-  '
-)
+live_log "rail keypress-to-repaint raw samples (ms): ${samples[*]}"
+live_log "rail measurement boundary: tmux send-keys -> first capture-pane showing the moved cursor"
 
-live_log "rail keypress-to-repaint latency: $summary"
-live_log "raw samples (ms): ${samples[*]}"
-live_log "measurement boundary: tmux send-keys -> first capture-pane showing the moved cursor"
+# --- first visible model reply (report only) ------------------------------
 
-# v7 delegation-card appearance (ticket #138, final verification #143): time
-# from the task.delegate RPC to the first capture showing the Work card title.
-# This crosses the same tmux boundary as the rail probe and exercises the
-# durable patch path; it is a measurement, not a threshold. Each sample is a
-# separate dispatch group, cancelled and held out before the next sample.
-# Ticket #180: Workspaces is its own pane; Enter opens #LatencyProbe.
-live_focus_workspaces_interact "$LIVE_TUI_SESSION"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "Message…" 15 "workspace surface for the card probe"
-CARD_SAMPLES="${ENSEMBLE_LATENCY_CARD_SAMPLES:-5}"
-if ! [[ "$CARD_SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
-  live_fail "ENSEMBLE_LATENCY_CARD_SAMPLES must be a positive integer (got: $CARD_SAMPLES)"
+first_token_samples=()
+if (( FIRST_TOKEN_SAMPLES > 0 )); then
+  # Ticket #180: Workspaces is its own pane; Enter opens #LatencyProbe.
+  live_focus_workspaces_interact "$LIVE_TUI_SESSION"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Message…" 15 "workspace surface for the first-token probe"
+
+  first_title="latency-first-token-1"
+  first_start=$(date +%s%N)
+  live_invoke "task.delegate" "{\"workspaceID\":\"$probe_ws\",\"assigneeID\":\"$probe_agent\",\"title\":\"$first_title\",\"instruction\":\"latency-first-token-fixture\",\"mode\":\"research\"}" >/dev/null
+  first_rpc_end=$(date +%s%N)
+  # The fake provider's short reply is a unique visible model token in this
+  # fresh TUI and stays on screen. The marker is report-only; no budget
+  # depends on it.
+  live_wait_for 30 "first visible model reply" live_capture_contains "$LIVE_TUI_SESSION" "Onboarding complete" \
+    || live_fail_timing "first visible model reply did not appear within 30s"
+  first_now=$(date +%s%N)
+  first_token_samples+=($(( (first_now - first_start) / 1000000 )))
+  live_log "first-token: total=$(( (first_now - first_start) / 1000000 ))ms rpc=$(( (first_rpc_end - first_start) / 1000000 ))ms first-visible=$(( (first_now - first_rpc_end) / 1000000 ))ms (report only)"
+
+  first_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$first_title\" })[0]?.id" | tr -d '"')
+  [[ -n "$first_id" && "$first_id" != "null" ]] || live_fail "first-token fixture task is missing from the snapshot"
+  live_invoke "task.cancel" "{\"id\":\"$first_id\"}" >/dev/null
+  live_wait_for 15 "first-token card cleared" live_capture_absence "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group" \
+    || live_fail "first-token card did not clear after cancellation"
 fi
 
-CARD_MEASURED_MS=""
-measure_card() {
-  local title="$1" start now pane task_id lines
-  start=$(date +%s%N)
-  live_invoke "task.delegate" "{\"workspaceID\":\"$probe_ws\",\"assigneeID\":\"$probe_agent\",\"title\":\"$title\",\"instruction\":\"fake-queue-hold\",\"mode\":\"research\"}" >/dev/null
-  while true; do
-    pane=$(live_capture "$LIVE_TUI_SESSION")
-    lines=$(grep -F -- "$title" <<<"$pane" | grep -vF "Assigned to" || true)
-    if [[ -n "$lines" ]]; then
-      now=$(date +%s%N)
-      CARD_MEASURED_MS=$(( (now - start) / 1000000 ))
-      break
-    fi
-    now=$(date +%s%N)
-    if (( now - start > 10000000000 )); then
-      live_fail "Work card for '$title' did not appear within 10s after task.delegate"
-    fi
-  done
-  task_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$title\" })[0]?.id" | tr -d '"')
-  [[ -n "$task_id" && "$task_id" != "null" ]] || live_fail "card probe task '$title' is missing from the snapshot"
-  live_invoke "task.cancel" "{\"id\":\"$task_id\"}" >/dev/null
-  live_wait_for 15 "card probe group cleared" live_capture_absence "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group" \
-    || live_fail "card probe group did not clear after cancellation"
-}
+# --- patch-card fixture and budget evaluation -----------------------------
 
-card_samples=()
-for ((i = 0; i < CARD_SAMPLES; i++)); do
-  measure_card "latency-card-$((i + 1))"
-  card_samples+=("$CARD_MEASURED_MS")
-done
+result_file="${ENSEMBLE_LATENCY_OUT:-$LIVE_LOGS/latency-result.json}"
+mkdir -p "$(dirname "$result_file")"
+rail_csv=$(IFS=,; echo "${samples[*]}")
+first_csv=""
+if (( ${#first_token_samples[@]} > 0 )); then
+  first_csv=$(IFS=,; echo "${first_token_samples[*]}")
+fi
 
-card_summary=$(
-  printf '%s\n' "${card_samples[@]}" | sort -n | awk '
-    { values[NR] = $1; total += $1 }
-    END {
-      n = NR
-      p50 = values[int((n + 1) / 2)]
-      p95 = values[int((n * 95 + 99) / 100)]
-      printf "min=%dms p50=%dms p95=%dms max=%dms mean=%.1fms n=%d", values[1], p50, p95, values[n], total / n, n
-    }
-  '
-)
-live_log "delegation-card appearance latency: $card_summary"
-live_log "raw card samples (ms): ${card_samples[*]}"
-live_log "card measurement boundary: task.delegate RPC invoke -> first capture-pane showing the Work card title"
-live_log "latency probe complete (measurement only; no threshold gate)"
+live_log "patch-card fixture: ${CARD_SAMPLES} sample(s); profile=$PROFILE; deliberate regression=${REGRESSION_MS}ms"
+ENSEMBLE_LATENCY_SERVER_URL="$LIVE_SERVER_URL" \
+ENSEMBLE_LATENCY_SERVER_PASSWORD="$LIVE_SERVER_PASSWORD" \
+ENSEMBLE_LATENCY_DIRECTORY="$LIVE_PROJECT" \
+ENSEMBLE_LATENCY_AGENT_ID="$probe_agent" \
+ENSEMBLE_LATENCY_WORKSPACE_ID="$probe_ws" \
+ENSEMBLE_LATENCY_CARD_SAMPLES="$CARD_SAMPLES" \
+ENSEMBLE_LATENCY_RAIL_SAMPLES="$rail_csv" \
+ENSEMBLE_LATENCY_FIRST_TOKEN_SAMPLES="$first_csv" \
+ENSEMBLE_LATENCY_PROFILE="$PROFILE" \
+ENSEMBLE_LATENCY_REGRESSION_MS="$REGRESSION_MS" \
+ENSEMBLE_LATENCY_OUT="$result_file" \
+  "$LIVE_NODE_BIN" --experimental-strip-types "$LIVE_ROOT/scripts/lib/latency-driver.mjs" \
+  || live_fail "patch-card fixture failed"
+
+if ! "$LIVE_NODE_BIN" --experimental-strip-types "$LIVE_ROOT/scripts/latency-budget.mjs" "$result_file"; then
+  live_fail "latency budget failed (profile=$PROFILE)"
+fi
+
+if (( REGRESSION_MS > 0 )); then
+  live_log "deliberate regression injected: ${REGRESSION_MS}ms per patch-card sample"
+fi
+live_log "latency budget passed (profile=$PROFILE)"

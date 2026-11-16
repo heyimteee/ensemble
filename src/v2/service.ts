@@ -85,6 +85,7 @@ import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type Sto
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
 import { createLogRateLimiter, createLogger, defaultLogDirectory, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
+import { SUPPORTED_OPENCODE_VERSIONS, normalizeHostVersion, warnUnsupportedHost } from "./host-compatibility.ts"
 import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
 import { effectiveToolSurface, isToolSurface } from "./tool-surface.ts"
@@ -200,6 +201,8 @@ import type {
  * leaving the session surface structurally open for the test doubles.
  */
 type Ctx = {
+  /** Ticket #257: the running CLI release, used by the compatibility preflight. */
+  app?: { version?: string }
   location?: { directory?: string }
   permission?: Plugin.Context["permission"]
   onboarding?: boolean
@@ -756,6 +759,17 @@ export class EnsembleV2Service {
     this.startedAtMs = now()
     this.logger = createLogger({ role: "service", instanceID: this.instanceID })
     setGlobalLogger(this.logger)
+    // Ticket #257: the host API range is separate from the CLI version. Warn
+    // once per realm on an untested host; required API failures still surface
+    // from the location attachment.
+    const hostVersion = normalizeHostVersion(this.ctx?.app?.version)
+    const compatibilityWarning = warnUnsupportedHost(this.ctx)
+    if (compatibilityWarning) {
+      this.logger.event("warn", "host", "host.unsupported", {
+        version: hostVersion ?? null,
+        supported: [...SUPPORTED_OPENCODE_VERSIONS],
+      })
+    }
     // Ticket #150: prefer the plugin location exposed by the declared Context
     // API; the process cwd is only a fallback and can differ from every loaded
     // location.
@@ -766,6 +780,7 @@ export class EnsembleV2Service {
     this.logger.event("info", "service", "service.start", {
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       directory: locationDirectory ?? process.cwd(),
+      hostVersion: hostVersion ?? null,
       epoch: this.epochValue,
       pid: process.pid,
       logFiles: this.logger.stats(),

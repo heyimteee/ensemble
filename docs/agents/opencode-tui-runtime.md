@@ -5,7 +5,7 @@ Read before changing the TUI or host integration, or diagnosing location diverge
 ## Evidence and versions
 
 - **Declared API/source:** the lockfile installs `@opencode/plugin` **2.2.1** and OpenTUI **0.7.0** for checking. Inspect their declarations and shipped implementation using the paths below.
-- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI now pins Node **26.12.1** and OpenCode **2.2.6** for the deterministic fake/empty live job. These are not the same as the pinned type-package version. The [v7 verification](../verification/2026-11-07-v7.md), the [dispatch-budget verification](../verification/2026-11-08-dispatch-budgets.md), the [workspace-v2 verification](../verification/2026-11-09-workspace-v2.md), and the [native host contract probe](../verification/2026-11-10-native-host-contract.md) ran Node **26.12.1** with OpenCode **2.2.6** on Linux/tmux. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
+- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI pins Node **26.12.1** and OpenCode **2.2.7** for the deterministic PR live jobs; the [compatibility workflow](../../.github/workflows/compatibility.yml) runs both supported hosts, 2.2.6 and 2.2.7, and the [host support range](../compatibility/opencode-host-range.md) records the peer range and runtime warning. These are not the same as the pinned type-package version. The [v7 verification](../verification/2026-11-07-v7.md), the [dispatch-budget verification](../verification/2026-11-08-dispatch-budgets.md), the [workspace-v2 verification](../verification/2026-11-09-workspace-v2.md), and the [native host contract probe](../verification/2026-11-10-native-host-contract.md) ran Node **26.12.1** with OpenCode **2.2.6** on Linux/tmux. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
 - **Repository behavior:** links below describe the current implementation. A passing typecheck establishes agreement with installed types, not compatibility with every installed host. Record `node --version` and `opencode --version` with live results; recheck assumptions when upgrading.
 
 Research proposals are not implemented guarantees. In particular, one local service descriptor does not discover every service process, and a snapshot request is not guaranteed to be free of server-side writes from unrelated maintenance.
@@ -88,11 +88,17 @@ modes, workspace scope, and window budgets;
 and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell.md).
 
 - The root row is Rail | Chat | Work. `workspacePaneWidths` is the only width
-  function: the rail clamps to 26–34, Work takes a responsive share, and chat
-  receives the remainder with a readable minimum. Breakpoints are ≥118
-  (three panes), 96–117 (three panes, compact Work), and <96 (right drawer).
-  `workPaneBodyHeight` is the matching body-height helper. Do not recompute
-  either number in a consumer or test; the size matrix reads these helpers.
+  function: the rail clamps to 26–34, Work takes a responsive share capped at
+  53 columns, and chat receives the remainder with a readable minimum. The
+  53-column cap is the card-mode floor (49 content columns), so a very wide
+  terminal gives the reclaimed width to the chat instead of a second
+  transcript. Breakpoints are ≥118 (three panes), 96–117 (three panes,
+  compact Work), and <96 (right drawer). `workPaneBodyHeight` is the matching
+  body-height helper; `workPaneHeaderForWidth` drops the done segment only
+  when the full Work header would truncate and the compact form fits, keeping
+  the view, group/active counts, and page visible at the cap. Do not
+  recompute either number in a consumer or test; the size matrix reads these
+  helpers.
 - Rail agents group by primary workspace (active, most recent membership,
   Homeless), each appears once, the subline is role only, and `z` or a header
   click toggles a durable collapse group. The Workspaces section is a separate
@@ -263,7 +269,7 @@ client restart is the targeted remedy for a stale TUI graph.
 
 ## Verification gates
 
-Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` installs the locked development dependencies. Run from the repository:
+Use Node **22.23.4+** (the package engine; the unit/typecheck gate is verified on 22.23.4, 24.22.1, and 26.12.1), with Node/npm on `PATH`. Live suites run on Node **26.12.1**. `npm ci` installs the locked development dependencies. Run from the repository:
 
 | Command | What it establishes |
 | --- | --- |
@@ -274,7 +280,7 @@ Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` insta
 | `npm run test:live:fake` | Real host with deterministic local fake-provider streaming, rich output/finalization, stale-line markers, help, platform labels, and the ticket #177 three-pane/rail/picker/approvals/file-reference matrix; no API key/external model request. |
 | `npm run test:live:fake:all` | Fake then empty-catalog scenarios in order; fails fast and prints a compact `PASS`/`FAIL`/`SKIP` summary. Deterministic fake-and-empty suite. |
 | `npm run test:live:all` | The full local matrix: fake, empty catalog, then real host catalog. Same fail-fast summary; the real scenario is not deterministic and stays local. |
-| `npm run test:live:latency` | Reproducible keypress-to-repaint probe on the isolated fake host: grouped rail `j`/`k` from `tmux send-keys` to the first capture showing the moved cursor, plus right-pane delegation-card appearance from `task.delegate` to the first capture showing the card title. Reports samples and percentiles; no threshold gate. |
+| `npm run test:live:latency` | Latency budget probe on the isolated fake host: gated rail `j`/`k` keypress p95 (50 ms reference), gated deterministic patch-card p95 (250 ms reference) from the durable `changes.since` patch to the real Work-card mapping, and report-only first-token. The default smoke profile uses generous PR thresholds; `npm run test:live:latency:reference` runs the strict reference gate. See [the budget policy](../verification/latency-budget.md). |
 | `npm run test:live:sizes` | Three-pane shell size matrix at 80×24, 100×30, 120×40, and 160×50 on the isolated fake host. Checks the right pane and the open-by-default 80×24 drawer with durable `Space b r` visibility and F3 removal, card/compact layout, ACTIVE pagination, spatial `hjkl` and page-edge `j`/`k`/`h`/`l`, the exact right edge, white/grey card focus borders, and per-pane heading/border focus from ANSI capture; records idle TUI CPU and CPU for one to three working cards, and runs a `NO_COLOR=1` still-motion check. Linux/tmux only. |
 | `npm run test:live:lifecycle` | Full wall-clock fake lifecycle run: a ~5m40s stream crosses the old five-minute delivery deadline while heartbeats keep the 60s lease live, and an immediate backlog delivery stays pending past its own deadline before running. Also captures the doctor and structured log summary. Late-success, genuine interruption, and stalled/retrying labels remain service/TUI-seam tests (logged as skips). About six minutes. |
 | `npm run test:live:probe` | Ticket #210's native host event-contract probe: records the real 2.2.6 event order and payload shapes for native turns, retry, interruption, attachments, synthetic messages, background subagents, move, and session-list scopes, then replays the committed fixture contract without a model. Privacy-gates the generated record before the contract test runs. |

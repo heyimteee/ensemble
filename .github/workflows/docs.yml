@@ -1,0 +1,27 @@
+name: Docs
+
+# Ticket #262: documentation freshness. The check reads the canonical contract,
+# host, and Node constants and fails when the current docs claim a stale
+# version or a current verification record is missing from the docs index.
+# Keep this job separate from the Node and host matrices so docs freshness is
+# cheap and independently visible.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: docs:check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26.12.1"
+          cache: npm
+      - run: npm run docs:check

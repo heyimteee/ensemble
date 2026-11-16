@@ -47,6 +47,10 @@ LIVE_NODE_BIN=""
 LIVE_SESSION_NAMES=()
 LIVE_PROCESS_ENV=()
 LIVE_SKIP_MARKER="${ENSEMBLE_LIVE_SKIP_MARKER:-}"
+LIVE_ARTIFACTS="${ENSEMBLE_LIVE_ARTIFACTS:-}"
+LIVE_TYPE_TIMEOUT="${ENSEMBLE_LIVE_TYPE_TIMEOUT:-15}"
+LIVE_FAILURE_KIND=""
+LIVE_FAILURE_MESSAGE=""
 
 live_log() { printf 'live: %s\n' "$*"; }
 live_debug() { [[ "${ENSEMBLE_LIVE_DEBUG:-0}" == "1" ]] && printf 'live: %s\n' "$*" >&2 || true; }
@@ -65,7 +69,15 @@ live_skip() {
   live_log "$*; skipping"
   exit 0
 }
-live_fail() { printf 'live: %s\n' "$*" >&2; exit 1; }
+live_fail() {
+  LIVE_FAILURE_MESSAGE="$*"
+  printf 'live: %s\n' "$*" >&2
+  exit 1
+}
+# A readiness or input wait is a timing signal, not a product assertion. Only
+# these failures are eligible for the matrix's one classified retry.
+live_fail_timing() { LIVE_FAILURE_KIND="timing"; live_fail "$@"; }
+live_fail_infrastructure() { LIVE_FAILURE_KIND="infrastructure"; live_fail "$@"; }
 
 # Resolve the absolute binary. The nvm installation is preferred over the
 # ~/.local/bin wrapper because the wrapper reads $HOME/.nvm and would break
@@ -297,6 +309,21 @@ live_capture_matches() {
   live_capture "$session" | grep -qE -- "$expression"
 }
 
+# Reduced-motion still frame for Ensemble's own surfaces. The compatibility
+# hosts draw their own footer spinner (OpenCode 2.2.6 shows "Finishing
+# startup…"), so a pane-wide "no motion glyph" scan would assert host chrome
+# instead of Ensemble behavior. The Work card header and the rail busy mark are
+# the product surfaces: both stay on frame 0, and no later frame may replace
+# either one.
+live_capture_reduced_motion_frame0() {
+  local session="$1" agent="$2" status="$3" workspace="$4" pane
+  pane=$(live_capture "$session")
+  grep -Eq "${agent} +([^ ]+ +)*⠋ ${status}" <<<"$pane" || return 1
+  grep -Eq "${workspace} +⠋[0-9]" <<<"$pane" || return 1
+  ! grep -Eq "${agent} +([^ ]+ +)*(⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) ${status}" <<<"$pane"
+  ! grep -Eq "${workspace} +[⠙⠹⠸⠼⠴⠦⠧⠇⠏][0-9]" <<<"$pane"
+}
+
 live_wait_for_text() {
   local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
   live_wait_for "$seconds" "$description" live_capture_contains "$session" "$text"
@@ -321,6 +348,41 @@ live_require_absence() {
   local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-absence of $text}"
   live_wait_for_absence "$session" "$text" "$seconds" "$description" \
     || live_fail "TUI still shows: $description"
+}
+
+# Step/field readiness waits are timing-classified. Use these for transitions
+# whose only job is to prove the next surface arrived; a timeout is a harness
+# timing failure, not a product assertion.
+live_require_ready_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for_text "$session" "$text" "$seconds" "$description" \
+    || live_fail_timing "TUI did not become ready: $description"
+}
+
+live_require_ready_absence() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-absence of $text}"
+  live_wait_for_absence "$session" "$text" "$seconds" "$description" \
+    || live_fail_timing "TUI did not become ready: $description"
+}
+
+# Prove the screen is still, not merely sampled after a fixed delay. Two
+# captures one stable interval apart must be byte-identical; the caller first
+# waits for any known transient (for example the 3 s "Message sent" status) to
+# expire so the stability window cannot straddle its removal.
+live_require_quiescent() {
+  local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-idle screen}"
+  local deadline first second
+  deadline=$(( $(date +%s%N) + seconds * 1000000000 ))
+  first=$(live_capture "$session")
+  while true; do
+    sleep 1.5
+    second=$(live_capture "$session")
+    [[ "$first" == "$second" ]] && return 0
+    if (( $(date +%s%N) >= deadline )); then
+      live_fail_timing "TUI did not become quiescent: $description"
+    fi
+    first=$second
+  done
 }
 
 live_require_any_text() {
@@ -434,6 +496,57 @@ live_capture_chat_joined() {
 
 live_capture_contains_joined() {
   live_capture_chat_joined "$1" | grep -qF -- "$2"
+}
+
+# Ticket #264: the group surface header is the contiguous block at the top of
+# the chat pane — the surface title plus any rows it wraps onto. Find the first
+# chat row that starts the title, cut the shared Work-pane edge (`│ │`), and
+# stop at the first blank row. Every transcript row carries a top margin, so a
+# later transcript mention can never satisfy a header assertion.
+live_capture_chat_header() {
+  local start end
+  read -r start end <<<"$(live_chat_columns)"
+  live_capture "$1" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const start = Number(process.argv[1]) - 1;
+      const rows = value.split("\n");
+      const first = rows.findIndex((line) => line.slice(start).trimStart().startsWith("#"));
+      if (first < 0) {
+        process.stdout.write("");
+        return;
+      }
+      const header = [];
+      for (let index = first; index < rows.length; index += 1) {
+        let row = rows[index].slice(start);
+        // The Work pane shares this row in the three-pane layout; cut at the
+        // border pair so its text cannot join the chat header.
+        const workEdge = row.indexOf("│ │");
+        if (workEdge >= 0) row = row.slice(0, workEdge);
+        row = row.replace(/\s*│\s*$/, "").trim();
+        if (row.length === 0) break;
+        header.push(row);
+      }
+      process.stdout.write(header.join(" "));
+    });
+  ' "$start"
+}
+
+live_chat_header_contains() {
+  live_capture_chat_header "$1" | grep -qF -- "$2"
+}
+
+live_require_chat_header_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for "$seconds" "$description" live_chat_header_contains "$session" "$text" \
+    || live_fail "group header does not show: $description"
+}
+
+live_assert_chat_header_text() {
+  local session="$1" text="$2" description="${3:-$text}"
+  live_chat_header_contains "$session" "$text" || live_fail "group header does not show: $description"
 }
 
 # Work-column bounds from the same shared pane model. Used for Work-local
@@ -588,6 +701,70 @@ live_require_joined_text() {
 live_assert_joined_text() {
   local session="$1" text="$2" description="${3:-$text}"
   live_capture_contains_joined "$session" "$text" || live_fail "TUI does not show: $description"
+}
+
+# Joined chat text matched as a regular expression. A row break can fall inside
+# a hyphenated word (`fake-rich-` then `fixture`), where the join inserts a
+# space the source text never had; a regex can tolerate that wrap without
+# dropping any of the expected text.
+live_capture_joined_matches() {
+  live_capture_chat_joined "$1" | grep -Eq -- "$2"
+}
+
+live_require_joined_matches() {
+  local session="$1" expression="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$expression}"
+  live_wait_for "$seconds" "$description" live_capture_joined_matches "$session" "$expression" \
+    || live_fail "TUI did not show: $description"
+}
+
+# Composer text: the composer draws its own single border inside the chat
+# content cells, so a draft that wraps ends one row with `│` and starts the
+# next with `│`. A plain chat join would put those edges between the wrapped
+# words. Slice the chat cell, find the composer box (the last single-line box
+# above the footer; message bubbles are rounded and the completion palette
+# sits above the composer), and join only its text rows with the vertical
+# edges removed. The suffix after a file selection still has to be present;
+# a missing suffix still fails.
+live_capture_composer_joined() {
+  local start end
+  read -r start end <<<"$(live_chat_columns)"
+  live_capture "$1" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const start = Number(process.argv[1]) - 1;
+      const end = Number(process.argv[2]);
+      const rows = value.split("\n")
+        .map((line) => line.slice(start, end).replace(/[▁▂▃▄▅▆▇█]+\s*$/, "").trim());
+      let bottom = -1;
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        if (/^└─+┘$/.test(rows[i])) { bottom = i; break }
+      }
+      if (bottom === -1) return;
+      let top = -1;
+      for (let i = bottom - 1; i >= 0; i -= 1) {
+        if (/^┌─+┐$/.test(rows[i])) { top = i; break }
+      }
+      if (top === -1) return;
+      const text = [];
+      for (let i = top + 1; i < bottom; i += 1) {
+        const row = rows[i].replace(/^│\s*/, "").replace(/\s*│$/, "").trim();
+        if (row.length > 0) text.push(row);
+      }
+      process.stdout.write(text.join(" "));
+    });
+  ' "$start" "$end"
+}
+
+live_capture_composer_contains() {
+  live_capture_composer_joined "$1" | grep -qF -- "$2"
+}
+
+live_require_composer_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for "$seconds" "$description" live_capture_composer_contains "$session" "$text" \
+    || live_fail "TUI composer did not show: $description"
 }
 
 # Bounded wait for a transient label that must appear exactly once in the chat
@@ -1272,15 +1449,58 @@ live_assert_grey_text() {
 
 # --- input ----------------------------------------------------------------
 
+# Send literal text and wait for the TUI to echo it before the caller sends
+# the next key. The old fixed sleep let a fast Enter coalesce with the text:
+# the textarea submit and the next list step could both consume it, skipping a
+# step. The predicate observes the typed value (or its last token when the
+# line wraps) and a pane change, so Enter is always a separate input event.
+live_type_visible() {
+  local session="$1" token="$2" before="$3" pane
+  pane=$(live_capture "$session")
+  grep -qF -- "$token" <<<"$pane" || return 1
+  [[ "$pane" != "$before" ]]
+}
+
 live_type() {
-  "$LIVE_TMUX_BIN" send-keys -l -t "$1" -- "$2"
-  # Let the TUI commit the text before the next key (Enter/Escape) is parsed;
-  # a single write can otherwise coalesce with the following key event.
-  sleep 0.5
+  local session="$1" text="$2" before token
+  before=$(live_capture "$session")
+  "$LIVE_TMUX_BIN" send-keys -l -t "$session" -- "$text"
+  # A long line wraps and a whole-string or whole-token match would never
+  # appear contiguously. The last four non-space characters are short enough to
+  # survive a wrap at the final line boundary; the pane change proves the input
+  # had an effect even when that suffix already existed elsewhere.
+  token=$(printf '%s' "$text" | awk '{ value = value $0 } END { sub(/[ \t]+$/, "", value); print substr(value, length(value) - 3) }')
+  [[ -n "$token" ]] || token="$text"
+  live_wait_for "$LIVE_TYPE_TIMEOUT" "typed text in the TUI" live_type_visible "$session" "$token" "$before" \
+    || live_fail_timing "typed text did not reach the TUI: $text"
 }
 
 live_key() {
   "$LIVE_TMUX_BIN" send-keys -t "$1" "$2"
+}
+
+# Settle the composer in Insert mode before a submit. A queued Escape or a late
+# completion refresh can leave the palette open; Enter then selects a completion
+# row instead of submitting, preserving the draft with no validation feedback.
+# Prove the TUI consumes a full Normal/Insert round-trip first. A host too
+# starved to render that round-trip is a timing failure, so the scenario retries
+# as a class; the product assertion after the submit is never retried.
+live_settle_composer_insert() {
+  local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-composer}"
+  local deadline attempts=0
+  deadline=$(( $(date +%s%N) + seconds * 1000000000 ))
+  while (( attempts < 4 )); do
+    attempts=$(( attempts + 1 ))
+    live_key "$session" Escape
+    if live_poll_for 3 live_capture_contains "$session" "NORMAL  │ COMPOSER"; then
+      live_key "$session" "i"
+      live_wait_for "$seconds" "$description Insert ready" live_capture_contains "$session" "INSERT  │ COMPOSER" \
+        || live_fail_timing "composer did not return to Insert: $description"
+      return 0
+    fi
+    (( $(date +%s%N) >= deadline )) && break
+  done
+  live_fail_timing "composer did not become ready: $description"
 }
 
 live_key_repeat() {
@@ -1443,6 +1663,22 @@ live_snapshot_has_workspace_named() {
   ' "$name" >/dev/null 2>&1
 }
 
+# Transcript lines are also durable messages. A long transcript can scroll a
+# system assignment line out of the visible chat cell while its product state
+# remains exact; this predicate observes that state without depending on the
+# current scroll position.
+live_snapshot_has_message_containing() {
+  local text="$1" output
+  output=$(live_snapshot 2>/dev/null | live_snapshot_output 2>/dev/null) || return 1
+  [[ -n "$output" ]] || return 1
+  printf '%s' "$output" | "$LIVE_NODE_BIN" -e '
+    const output = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    const text = process.argv[1];
+    const messages = Object.values(output.state?.messages ?? {}).flat();
+    process.exit(messages.some((message) => typeof message.text === "string" && message.text.includes(text)) ? 0 : 1);
+  ' "$text" >/dev/null 2>&1
+}
+
 live_snapshot_value() {
   local expression="$1" output
   output=$(live_snapshot | live_snapshot_output)
@@ -1529,11 +1765,68 @@ live_wait_for_subtask_status() {
 
 live_redact() {
   local secret="${LIVE_SERVER_PASSWORD:-}"
-  if [[ -n "$secret" ]]; then
-    awk -v secret="$secret" '{ while (pos = index($0, secret)) $0 = substr($0, 1, pos - 1) "[redacted]" substr($0, pos + length(secret)); print }' | grep -v -i -E 'password|secret|token|key' || true
+  awk -v secret="$secret" \
+      -v base="${LIVE_BASE:-}" \
+      -v home="${LIVE_HOME:-}" \
+      -v project="${LIVE_PROJECT:-}" \
+      -v userhome="${HOME:-}" '
+    {
+      if (base != "") gsub(base, "<live-base>")
+      if (home != "") gsub(home, "<live-home>")
+      if (project != "") gsub(project, "<live-project>")
+      if (userhome != "" && userhome != "/") gsub(userhome, "<home>")
+      if (secret != "") gsub(secret, "[redacted]")
+      print
+    }' | grep -v -i -E 'password|secret|token|key' || true
+}
+
+# A failed attempt preserves the same evidence the operator would see in the
+# console: one pane capture per session plus the three harness logs. Paths and
+# the server password are redacted; conversation content is not written by the
+# harness fixtures in the first place. The matrix sets ENSEMBLE_LIVE_ARTIFACTS
+# to a per-attempt directory so CI can upload it.
+live_artifact_dir() {
+  if [[ -n "$LIVE_ARTIFACTS" ]]; then
+    printf '%s\n' "$LIVE_ARTIFACTS"
     return 0
   fi
-  grep -v -i -E 'password|secret|token|key' || true
+  printf '%s\n' "${TMPDIR:-/tmp}/opencode/ensemble-live-artifacts/$(date +%Y%m%d-%H%M%S)-$$"
+}
+
+live_json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+live_write_artifacts() {
+  local status="$1" dir session log message kind suite attempt escaped
+  dir=$(live_artifact_dir)
+  mkdir -p "$dir/panes" "$dir/logs" 2>/dev/null || return 0
+  for session in "${LIVE_SESSION_NAMES[@]}"; do
+    if "$LIVE_TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+      live_capture "$session" | live_redact >"$dir/panes/$session.txt" 2>/dev/null || true
+    fi
+  done
+  for log in "$LIVE_LOGS/server.log" "$LIVE_LOGS/tui.log" "$LIVE_LOGS/fake.log"; do
+    [[ -f "$log" ]] || continue
+    tail -n 400 "$log" | live_redact >"$dir/logs/$(basename "$log")" 2>/dev/null || true
+  done
+  message="${LIVE_FAILURE_MESSAGE:-unknown failure}"
+  kind="${LIVE_FAILURE_KIND:-}"
+  suite="${ENSEMBLE_LIVE_SUITE:-live}"
+  attempt="${ENSEMBLE_LIVE_ATTEMPT:-1}"
+  escaped=$(live_json_escape "$message")
+  if [[ -n "$kind" ]]; then
+    printf '{"suite":"%s","attempt":%s,"status":"failed","kind":"%s","message":"%s","artifactPath":"%s","exitCode":%s}\n' \
+      "$(live_json_escape "$suite")" "$attempt" "$(live_json_escape "$kind")" "$escaped" "$(live_json_escape "$dir")" "$status" \
+      >"$dir/failure.json"
+  else
+    printf '{"suite":"%s","attempt":%s,"status":"failed","message":"%s","artifactPath":"%s","exitCode":%s}\n' \
+      "$(live_json_escape "$suite")" "$attempt" "$escaped" "$(live_json_escape "$dir")" "$status" \
+      >"$dir/failure.json"
+  fi
+  printf 'suite: %s\nattempt: %s\nclassification: %s\nexit: %s\nartifact: %s\nmessage: %s\n' \
+    "$suite" "$attempt" "${kind:-unclassified}" "$status" "$dir" "$message" >"$dir/failure.txt"
+  printf 'live: artifacts: %s\n' "$dir" >&2
 }
 
 live_dump_context() {
@@ -1563,6 +1856,7 @@ live_print_preserved() {
   echo "live: preserved failure state (ENSEMBLE_LIVE_KEEP=1)" >&2
   echo "  base: $LIVE_BASE" >&2
   echo "  logs: $LIVE_LOGS" >&2
+  echo "  artifacts: $(live_artifact_dir)" >&2
   for session in "${LIVE_SESSION_NAMES[@]}"; do
     if "$LIVE_TMUX_BIN" has-session -t "$session" 2>/dev/null; then
       echo "  session: $session (tmux attach -t $session)" >&2
@@ -1586,6 +1880,7 @@ live_on_exit() {
   set +e
   if (( status != 0 )); then
     live_dump_context
+    live_write_artifacts "$status"
   fi
   if (( status != 0 )) && live_keep_enabled; then
     live_print_preserved

@@ -153,8 +153,9 @@ export function completionEntry(
   task: Subtask,
   agentLabel: string,
   now: number,
+  env?: NodeJS.ProcessEnv,
 ): InlineCompletion | undefined {
-  const text = terminalAnnouncement(task, agentLabel, now)
+  const text = terminalAnnouncement(task, agentLabel, now, env)
   if (text === undefined) return undefined
   // Ticket #122: the completion row carries its emphasis tone so the
   // transcript can acknowledge a failed/cancelled outcome once without
@@ -186,12 +187,13 @@ export function accumulateCompletions(
   tasks: Subtask[],
   agentLabelFor: (task: Subtask) => string,
   now: number,
-  limit: number = CLIENT_MESSAGE_LIMIT,
+  options: { limit?: number; env?: NodeJS.ProcessEnv } = {},
 ): Map<string, InlineCompletion> {
+  const limit = options.limit ?? CLIENT_MESSAGE_LIMIT
   let next: Map<string, InlineCompletion> | undefined
   for (const task of tasks) {
     if (previous.has(task.id) || next?.has(task.id)) continue
-    const entry = completionEntry(task, agentLabelFor(task), now)
+    const entry = completionEntry(task, agentLabelFor(task), now, options.env)
     if (!entry) continue
     if (!next) next = new Map(previous)
     next.set(task.id, entry)

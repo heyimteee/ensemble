@@ -361,6 +361,21 @@ test("a failed attach disposes the registrations it already created and releases
   }
 })
 
+test("a missing required host API still fails the attachment", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-locations-"))
+  const alpha = fakeHost("alpha", join(root, "alpha"))
+  delete (alpha.ctx as any).rpc
+
+  const { registry, stops } = serviceRegistry()
+  try {
+    await assert.rejects(() => registry.attach(alpha.ctx), /register/)
+    await waitFor(() => alpha.events.active() === 0)
+    assert.equal(stops.length, 1, "the failed location releases its service reference")
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("a text delta from the second location reaches the service once", async () => {
   const root = mkdtempSync(join(tmpdir(), "ensemble-locations-"))
   const alphaDirectory = join(root, "alpha")

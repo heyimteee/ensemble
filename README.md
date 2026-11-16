@@ -4,9 +4,9 @@
 
 Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The v2 runtime is the default. It is not published, versioned, or licensed. Compatibility is recorded against OpenCode 2.2.1; the v5.8 live matrix was run on OpenCode 2.2.5.
+> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is not published and no license has been selected. Compatibility is verified on OpenCode **2.2.6** and **2.2.7** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
 
-> **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md). Product behavior follows in tickets #212–#227.
+> **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md); the terminal-turn workflow is in [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md). Current behavior and evidence are recorded in the verification index.
 
 ## What it does
 
@@ -22,7 +22,7 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **Workspace config is human-editable.** `<workspace>/.ensemble/config.json` is authoritative for its name, leader, members, synthesis, and pause state. History stays in OpenCode storage, not the repository.
 - **Init writes the team contract.** `I`, `:init`, or `/init` appends a visible `/init` line and starts a System Agent init job. Progress streams into the chat and finalizes into a report; on success Ensemble writes the versioned block at the top of `AGENTS.md` and `.ensemble/init.json`, and on failure it restores the previous `AGENTS.md`. Init is solo-only and workspace-only, and the composer never falls through to native `/init`.
 - **Completions stay in the composer.** The composer is a wrapping textarea. `$`, `@`, and `/` open a bordered popup above it; typing filters, arrows move, Enter inserts or runs, and `Shift+Enter` adds a line. Workspace and agent creation use a centered multi-step wizard. List steps take `j`/`k`, `Enter`, `Space`, `/`, and `Esc`; text steps use the shared editor grammar. Move between steps with `n` next and `N` previous; `Esc` cancels, with a discard confirm when the draft is dirty. The optional memories step lists entries one by one with `a` add, `e` edit, and `x` delete.
-- **One modal grammar, one persistent mode.** Normal, Insert, Visual, and Command are global interaction states shared by the roster, chats, settings, wizards, and dialogs. Focus moves, overlays, wizard steps, and surface changes never change the mode; only explicit mode keys do, and `Enter` never does. Every text editor uses the same caret: a block in Normal, a line in Insert, Visual, and Command, and no caret when unfocused. `Esc` goes up one level and never quits; `Ctrl+G` leaves the focused editor and sets Normal. Leaving Ensemble hands the keyboard back to OpenCode immediately, so typing and `/` work in the native prompt without an `Esc`; `F2` returns. The two-row statusline uses typed segments (mode chip, context, git, position, hints) and faint `│` chrome separators with an ASCII `|` fallback. `Space` opens the leader menu and `?` opens the generated, searchable help catalog. App bindings are designed to avoid `Ctrl+letter` collisions with macOS and Herdr, but that intent has not been verified on a macOS/Herdr host; see the remaining limits in the v5.8 verification record.
+- **One modal grammar, one persistent mode.** Normal, Insert, Visual, and Command are global interaction states shared by the roster, chats, settings, wizards, and dialogs. Focus moves, overlays, wizard steps, and surface changes never change the mode; only explicit mode keys do, and `Enter` never does. Every text editor uses the same caret: a block in Normal, a line in Insert, Visual, and Command, and no caret when unfocused. `Esc` goes up one level and never quits; `Ctrl+G` leaves the focused editor and sets Normal. Leaving Ensemble hands the keyboard back to OpenCode immediately, so typing and `/` work in the native prompt without an `Esc`; `F2` returns. The two-row statusline uses typed segments (mode chip, context, git, position, hints) and faint `│` chrome separators with an ASCII `|` fallback. `Space` opens the leader menu and `?` opens the generated, searchable help catalog. App bindings are designed to avoid `Ctrl+letter` collisions with macOS and Herdr, but that intent has not been verified on a macOS/Herdr host; see the [macOS/Herdr manual checklist](docs/verification/macos-herdr-checklist.md).
 - **Mentions and team work are explicit.** `$Name` addresses a teammate in chat, `@path` is file-only, and work is assigned through Ensemble tools. The agent contract includes the same rules.
 - **Dispatch budgets are explicit and layered.** Every delegation and handoff requires `maxHops`, the direct dispatches the recipient may make (`0` is a one-shot ask). A command budget bounds all groups for one user command, a group budget bounds one relay segment, and depth bounds the ancestor chain. Defaults are 24/8/8 in 8-hop tiers. Work headers and tool results show used and left, an exhausted group is a controlled stop rather than a failure, and only the leader can open a linked continuation group inside the command remaining. `:limits` edits group hops, command hops, depth, and continuations for new commands; structured dispatch logs carry IDs, counts, and reason codes without task text, and the doctor verifies ledger invariants. See [ADR 0004](docs/adr/0004-dispatch-budgets-and-continuation.md).
 - **Skills are deliberate.** `/` at message start lists commands and every catalog skill with `Command`, `Skill | General`, or `Skill | <Owner>` flags; `$Agent /` lists only that agent's assigned skills. Assigned skills stay with their owner, General skills go to the leader for triage, and multiple `/skill` tokens for one agent group into one prompt carrying the exact user text. Invalid references reject the whole message and keep the draft. The built-in `/init` row is a General system executor, not a host skill.
@@ -30,6 +30,10 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **Skillboxes and models are per-agent.** Only assigned skills are available; backup models recover from availability failures.
 - **Memory and approvals are scoped.** Project memory, workspace memory, and global memory have provenance and approval rules.
 - **Work continues through OpenCode's server** after the Ensemble page closes.
+
+## Requirements
+
+- **Node 22.23.4 or newer.** The unit and typecheck gate is verified on Node 22.23.4, 24.22.1, and 26.12.1; the live suites run on Node 26.12.1. An older Node fails at plugin load with the supported range and upgrade guidance. The Node matrix runs `npm run verify` on every tested line.
 
 ## Install for local development
 
@@ -46,13 +50,15 @@ Run `/ensemble` or the **Open Ensemble** palette command. Do not also load the s
 
 If the plugin was already loaded before updating the package exports, run `opencode reload` or restart the OpenCode service.
 
+Ensemble supports OpenCode **2.2.6** and **2.2.7** on Linux/tmux with Node 26.12.1. The `@opencode/plugin` peer range is `2.2.6 || 2.2.7`. An unsupported host still loads, but Ensemble writes a runtime warning because its behavior is untested. See the [OpenCode host support range](docs/compatibility/opencode-host-range.md) for the CLI-to-API mapping and evidence.
+
 Upgrading from a pre-ledger workspace synthesizes dispatch groups on first
 access: used hops come from the existing non-completion delegations and
 handoffs, caps are raised to at least observed usage, and live rows that lack a
 task budget receive the group's remaining budget. In-flight work is not retroactively refused;
 reconciliation is logged. `settings.maxDepth` is deprecated and ignored for
 enforcement; depth now comes from `dispatchDepth` per group. Stale Ensemble
-blocks in workspace instruction files are rewritten at contract v4. See
+blocks in workspace instruction files are rewritten at contract v7. See
 [ADR 0004](docs/adr/0004-dispatch-budgets-and-continuation.md).
 
 ## Keyboard
@@ -136,7 +142,7 @@ own agent memory on creation; an empty list skips cleanly.
 npm test
 ```
 
-The unit suite covers routing, config discovery, workspace canonicalization, message sequencing, streaming, direct-chat queues, recovery, approvals, scheduling, init jobs, skill invocation planning, one-run leader grants, reset, reassignment races, dispatch budget arithmetic and refusal order, continuation validation, and legacy ledger reconciliation, plus the interaction reducer's persistent mode, caret mapping, wizard navigation/memory list, statusline segments/contrast, and page-activation route gate. The fake multi-location harness adds a five-hop relay, a nine-hop continuation, and an 8-hop command-cap stop after its measured 100-request path. `npm run test:live:fake` runs the deterministic fake provider and covers the v5.8 System Agent init progress/report, `/init` audit lines, `|` skill flags, assigned-skill invocation, grouped skills, multi-agent and mixed anchors, leader triage, and validation errors. `npm run test:live:fake:empty` covers the empty model catalog. `npm run test:live:fake:all` runs those two in order with a fail-fast summary; `npm run test:live:all` adds the real host-catalog scenario. `npm run test:live` boots an isolated OpenCode server and TUI against the real host catalog to verify the packaged plugin, empty state, agent creation, direct chat, leader help, and composer completions. `npm run test:live:latency` reports reproducible keypress-to-repaint samples from the isolated fake host. `npm run test:live:sizes` covers the three-pane shell at 80×24, 100×30, 120×40, and 160×50, and `npm run test:live:lifecycle` runs a full wall-clock five-minute-plus lease/heartbeat and queue-backlog scenario. Live checks are recorded in [docs/verification/2026-11-09-workspace-v2.md](docs/verification/2026-11-09-workspace-v2.md).
+The unit suite covers routing, config discovery, workspace canonicalization, message sequencing, streaming, direct-chat queues, recovery, approvals, scheduling, init jobs, skill invocation planning, one-run leader grants, reset, reassignment races, dispatch budget arithmetic and refusal order, continuation validation, and legacy ledger reconciliation, plus the interaction reducer's persistent mode, caret mapping, wizard navigation/memory list, statusline segments/contrast, and page-activation route gate. The fake multi-location harness adds a five-hop relay, a nine-hop continuation, and an 8-hop command-cap stop after its measured 100-request path. `npm run test:live:fake` runs the deterministic fake provider and covers the v5.8 System Agent init progress/report, `/init` audit lines, `|` skill flags, assigned-skill invocation, grouped skills, multi-agent and mixed anchors, leader triage, and validation errors. `npm run test:live:fake:empty` covers the empty model catalog. `npm run test:live:fake:all` runs those two in order with a fail-fast summary; `npm run test:live:all` adds the real host-catalog scenario. `npm run test:live` boots an isolated OpenCode server and TUI against the real host catalog to verify the packaged plugin, empty state, agent creation, direct chat, leader help, and composer completions. `npm run test:live:latency` reports reproducible keypress-to-repaint samples from the isolated fake host. `npm run test:live:sizes` covers the three-pane shell at 80×24, 100×30, 120×40, and 160×50, and `npm run test:live:lifecycle` runs a full wall-clock five-minute-plus lease/heartbeat and queue-backlog scenario. Live checks are recorded in [the native ingestion v7 E2E](docs/verification/2026-11-12-native-ingestion-v7-e2e.md) and [the native-first E2E](docs/verification/2026-11-12-e2e.md).
 
 ### Runtime diagnosis
 
@@ -154,14 +160,27 @@ By default it reads `$XDG_STATE_HOME/opencode/service.json`, or `~/.local/state/
 
 Every requested directory is queried on the **one selected service**, sequentially. Cross-location differences can reveal stale snapshots or concurrent changes, but this command does not discover or compare separate service processes. Config is read after each snapshot, so this is not an atomic pre-reconciliation view. Review remediation manually; the command does not apply it.
 
+## Known limitations
+
+- **Distribution and license are pending.** The package is private at version `0.1.0`; it is not published to a registry, and no license has been selected. Public repository visibility does not grant an open-source license.
+- **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 on Linux/tmux are tested. Other host releases load with a runtime warning but are untested, and macOS/Herdr and Windows remain unverified.
+- **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. Every PR runs the deterministic fake, size, lifecycle, subagent, native-first, Vera, tool-surface, multi-location, and latency-smoke jobs; the real-model `npm run test:live` acceptance is opt-in in the nightly workflow (`ENSEMBLE_NIGHTLY_REAL=1`) and is never part of the PR gate.
+- **Terminal accessibility depends on the host.** Screen-reader output, high-contrast modes, font scaling, and mouse drag-copy are host features. Ensemble supplies glyph-and-word status, reduced-motion, `NO_COLOR`, and ASCII fallbacks; see the [terminal accessibility checklist](docs/verification/terminal-accessibility-checklist.md).
+- **Some surfaces stay native.** Arbitrary OpenCode slash commands are not proxied into the group chat, rich Markdown links are not clickable, and direct conversations have no separate Ensemble search or export.
+- **The host owns page lifetime.** OpenCode keeps old plugin pages mounted; Ensemble's route gate prevents stale key ownership but cannot force the host to dispose them.
+
 ## Documentation
 
 - [v2 implementation notes](docs/implementation.md)
+- [Documentation index](docs/README.md)
 - [ADR index](docs/adr/README.md): every accepted architecture decision
 - [ADR 0004: dispatch budgets and continuation](docs/adr/0004-dispatch-budgets-and-continuation.md)
 - [ADR 0009: conversation identity and sessions](docs/adr/0009-conversation-identity-and-sessions.md)
 - [ADR 0010: native turn ingestion](docs/adr/0010-native-turn-ingestion.md)
 - [ADR 0011: mention routing and budgets](docs/adr/0011-mention-routing-and-budgets.md)
+- [Native ingestion state and AGENTS v7 full E2E](docs/verification/2026-11-12-native-ingestion-v7-e2e.md)
+- [Native-first full E2E](docs/verification/2026-11-12-e2e.md)
+- [Contract v7 verification](docs/verification/2026-11-12-ticket-253.md)
 - [Native host event contract](docs/verification/2026-11-10-native-host-contract.md)
 - [Workspace v2 verification](docs/verification/2026-11-09-workspace-v2.md)
 - [Dispatch budget verification](docs/verification/2026-11-08-dispatch-budgets.md)
@@ -169,11 +188,14 @@ Every requested directory is queried on the **one selected service**, sequential
 - [v5.7 verification record](docs/verification/2026-11-05-v57.md)
 - [v2 specification](https://github.com/heyimteee/ensemble/issues/17)
 - [v2 tickets](https://github.com/heyimteee/ensemble/issues)
-- [OpenCode compatibility report](docs/compatibility/opencode-2.2.1.md)
+- [OpenCode host support range](docs/compatibility/opencode-host-range.md): supported CLI releases, peer range, and runtime warning
+- [OpenCode 2.2.1 compatibility report](docs/compatibility/opencode-2.2.1.md): historical extension behavior, constraints, and gaps
 - [OpenTUI assessment](docs/assessments/opentui.md)
 - [Glossary](GLOSSARY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
+
+`npm run docs:check` asserts that the current contract, host, and Node claims stay aligned with the canonical constants and CI matrices. `npm run verify` also runs the CI job-graph check (`src/v2/ci-workflows.test.ts`), which keeps the PR/nightly suite ownership, timeouts, artifact uploads, and OpenCode pin aligned.
 
 ## License
 

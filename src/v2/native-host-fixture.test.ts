@@ -2,6 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { pathToFileURL } from "node:url"
+import { SUPPORTED_OPENCODE_VERSIONS } from "./host-compatibility.ts"
 
 /**
  * Ticket #210: the committed native host contract fixture.
@@ -49,9 +50,6 @@ const REQUIRED_CASES = [
   "session-list",
   "idle",
 ]
-
-/** Patch releases re-verified against this contract. */
-const SUPPORTED_OPENCODE_VERSIONS = ["2.2.6", "2.2.7"]
 
 function caseRows(name: string): Row[] {
   return rows.filter((row) => row.case === name)
