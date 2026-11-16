@@ -29,7 +29,10 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Reviewer standards](agents/review-standards.md): judgement calls only; mechanical rules stay in automated checks
 - [Domain document conventions](agents/domain.md)
 - [Contributing](../CONTRIBUTING.md)
-- [Security](../SECURITY.md)
+- [Security policy](../SECURITY.md)
+- [Threat model](security/threat-model.md): storage, filesystem/shell, tools, cross-workspace access, skills, approvals, model fallback, and logs, with code evidence
+- [Permission-model review](security/permission-model-review.md): approvals, outside-roster contact, external directories, self-approval, and native permission preservation
+- [Accepted risks](security/accepted-risks.md): dependency advisories and residual risks with review dates
 
 ## Support
 
@@ -41,6 +44,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 - [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
 - [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
+- [Security and privacy audit](verification/2026-11-16-ticket-271.md): threat model and permission review, the handoff symlink containment fix, `npm audit` baseline and accepted risks, Dependabot configuration, and the passing verify/docs gates
 - [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
 - [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
 - [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix
