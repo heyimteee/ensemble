@@ -157,15 +157,18 @@ logs. Maintainer response targets are best effort, not an SLA.
 
 ## Proven and pending
 
-The final-tip checks at `b194b95` supersede the earlier install evidence for
-the artifact. The clean install is still a loopback-registry check, not a
-public npm install.
+The final-tip runtime checks at `b194b95` supersede the earlier install
+evidence for the artifact. The package runtime is unchanged at the
+required-checks tip `4ccc410`; the later diff is CI workflows, the CI contract
+checker, and documentation. The clean install is still a loopback-registry
+check, not a public npm install.
 
 | Item | Status | Evidence |
 |---|---|---|
 | Build, pack, and runtime-only contents | **PASS** | [#269](../verification/2026-11-16-ticket-269.md), [#279](../verification/2026-11-16-ticket-279.md) |
 | Final-tip clean install at `b194b95` (Linux, OpenCode 2.2.7) | **PASS** | 124 runtime files, 507,824 bytes; six native tools, TUI route, `/ensemble`; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95) |
 | Final-tip deterministic fake E2E at `b194b95` (OpenCode 2.2.7) | **PASS** | `fake` 407 s, `fake-empty` 9 s; 2 passed, 0 retries; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95) |
+| Required CI at `4ccc410` (includes #285) | **PASS (one rerun)** | Verify (`verify`, `live-fake`, `live-native`, `live-multilocation`, `latency-smoke`), Compatibility (2.2.6 and 2.2.7), Docs, Node Matrix. First attempts hit `filtering spawned fd per keystroke (13 -> 14)` and `typed text did not reach the TUI: s`; reruns passed with no code change. Not a clean first pass. [Parent record](../verification/2026-11-17-ticket-268.md#required-ci-at-4ccc410) |
 | Six native tools, installed TUI route, `/ensemble` | **PASS** | [#279](../verification/2026-11-16-ticket-279.md), [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS/Herdr install, TUI, fake E2E, checklist except 1.7 | **PASS except 1.7** | [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS mouse drag (1.7) | **PENDING** | Not run; no selection/copy claim |

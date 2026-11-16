@@ -17,12 +17,15 @@ commit after the human-gated publish decision. If the artifact stays at
 The release-candidate verification tag is `rc-0.1.0-rc.2` at `d74fc3d`. It
 predates the #281–#284 fixes, so it is an evidence base, not a publish source,
 and it must not be moved. The fixed runtime was installed and checked on macOS
-from the build at `70f3da7`; the current integration tip adds only the
-repository-only doctor CLI and live harness plus documentation. Final-tip
-clean install, fake E2E, and 4-hour soak evidence at `b194b95` is in the
-[parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95)
-and the [soak record](../verification/2026-11-17-soak.md). If any runtime
-source changes, rerun the clean-install proof before tagging.
+from the build at `70f3da7`; the package runtime is unchanged through
+`b194b95` and `4ccc410`. The later diffs are the repository-only doctor CLI,
+the live harness, the CI workflows/contract checker, and documentation.
+Final-tip clean install, fake E2E, and 4-hour soak evidence at `b194b95` is in
+the [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95)
+and the [soak record](../verification/2026-11-17-soak.md). Required CI at
+`4ccc410` is green with one rerun of failed jobs and no code change; see the
+[CI section](../verification/2026-11-17-ticket-268.md#required-ci-at-4ccc410).
+If any runtime source changes, rerun the clean-install proof before tagging.
 
 See the [release notes](release-notes-0.1.0-rc.2.md), [launch
 plan](launch-plan-0.1.0-rc.2.md), [candidate

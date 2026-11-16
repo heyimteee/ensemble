@@ -74,6 +74,9 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 - The newest settled native-session state is retained when the cap is reached;
   an active turn, inbox, row, watchdog, or deferred child is never evicted.
   (#276)
+- CI live jobs and the compatibility matrix build `dist` after `npm ci`, and a
+  contract test rejects a live workflow that omits the build. This fixed the
+  release-blocking post-#279 CI failure. (#285)
 
 ### Verified
 
@@ -84,7 +87,15 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
   server tools and the installed TUI route/`/ensemble` loaded.
 - Final-tip deterministic fake E2E at `b194b95` on OpenCode 2.2.7:
   `test:live:fake:all` PASS; `fake` 407 s, `fake-empty` 9 s; 2 passed, 0 failed,
-  0 skipped, 0 retries; flake budget ok.
+  0 skipped, 0 retries; local flake budget ok.
+- Required CI at `4ccc410` is green: Verify (`verify`, `live-fake`,
+  `live-native`, `live-multilocation`, `latency-smoke`), Compatibility
+  (OpenCode 2.2.6 and 2.2.7), Docs, and Node Matrix. Verify and Compatibility
+  each needed one rerun of failed jobs with no code change; the first attempts
+  hit CI timing flakes (`filtering spawned fd per keystroke (13 -> 14)` and
+  `typed text did not reach the TUI: s`). This is not a clean first pass.
+- The package runtime is unchanged between `b194b95` and `4ccc410`; the later
+  diff is CI workflows, the CI contract checker, and documentation.
 - A 4-hour enforced soak at `b194b95` passed with 240 samples over 14,439 s and
   5,240 messages: 0 failures, queue/native settled, RSS growth 94.89 MiB/h
   (gate 256) and 19.14 MiB/1k messages (gate 64), no findings. The first run

@@ -55,7 +55,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
-- [Public release readiness — parent #268](verification/2026-11-17-ticket-268.md): the `0.1.0-rc.2` version/tag decision, every child ticket result, the final-tip install/fake/soak evidence, the PASS/PENDING release gates, the macOS 1.7 deferral, and the remaining human-gated publish steps
+- [Public release readiness — parent #268](verification/2026-11-17-ticket-268.md): the `0.1.0-rc.2` version/tag decision, every child ticket result including the #285 CI build fix, the final-tip install/fake/soak evidence, green required CI at `4ccc410` with its one rerun, the PASS/PENDING release gates, the macOS 1.7 deferral, and the remaining human-gated publish steps
 - [Four-hour enforced soak — 0.1.0-rc.2 final tip](verification/2026-11-17-soak.md): 240 samples over 14,439 s and 5,240 messages, 0 failures, 94.89 MiB/h and 19.14 MiB/1k-message growth, queue/native settled, and the pending supported-version 2.2.7 rerun
 - [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence
 - [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
