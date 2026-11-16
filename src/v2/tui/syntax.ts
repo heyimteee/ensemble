@@ -1,4 +1,7 @@
-export function markdownStyles(theme: any): Record<string, any> {
+import { RGBA } from "@opentui/core"
+import { isNoColor } from "./theme.ts"
+
+export function markdownStyles(theme: any, env: NodeJS.ProcessEnv = process.env): Record<string, any> {
   const md = theme?.markdown ?? {}
   const syntax = theme?.syntax ?? {}
   const text = theme?.text ?? {}
@@ -61,5 +64,25 @@ export function markdownStyles(theme: any): Record<string, any> {
     "markup.imageText": { fg: linkText },
     "markup.codeBlock": { fg: code },
   }
-  return styles
+  // Ticket #284: the host theme's Markdown/syntax styles are the transcript's
+  // remaining concrete-color source. Under `NO_COLOR` keep every scope and
+  // its emphasis attributes, but resolve the foreground to the terminal
+  // default and paint no background. The caller still passes default-intent
+  // fg/bg to `<markdown>`, so code blocks inherit the terminal surface.
+  return isNoColor(env) ? monochromeMarkdownStyles(styles) : styles
+}
+
+function monochromeMarkdownStyles(styles: Record<string, any>): Record<string, any> {
+  const foreground = RGBA.defaultForeground()
+  const plain: Record<string, any> = {}
+  for (const [scope, style] of Object.entries(styles)) {
+    plain[scope] = { ...style, fg: foreground }
+    delete plain[scope].bg
+  }
+  // OpenTUI's Markdown renderable paints blockquote/table/rule borders from
+  // the `conceal` style and otherwise falls back to a hard-coded `#888888`.
+  // Registering the scope keeps those structural glyphs on the default
+  // foreground without changing any non-NO_COLOR style.
+  plain.conceal = { fg: foreground }
+  return plain
 }
