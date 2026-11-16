@@ -4,7 +4,7 @@
 
 Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is not published and no license has been selected. Compatibility is verified on OpenCode **2.2.6** and **2.2.7** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
+> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is MIT licensed, named `@heyimteee/ensemble`, and not published to a public registry yet. Compatibility is verified on OpenCode **2.2.6** and **2.2.7** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
 
 > **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md); the terminal-turn workflow is in [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md). Current behavior and evidence are recorded in the verification index.
 
@@ -35,9 +35,25 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 
 - **Node 22.23.4 or newer.** The unit and typecheck gate is verified on Node 22.23.4, 24.22.1, and 26.12.1; the live suites run on Node 26.12.1. An older Node fails at plugin load with the supported range and upgrade guidance. The Node matrix runs `npm run verify` on every tested line.
 
-## Install for local development
+## Install
 
-Add the repository to `opencode.json`:
+Ensemble is one npm OpenCode plugin package, `@heyimteee/ensemble`, containing both the server and TUI parts. The package is not on the public npm registry yet. Once it is published, the supported install path is:
+
+```sh
+opencode plugin add @heyimteee/ensemble
+```
+
+Pin an exact version when an update must be deliberate:
+
+```sh
+opencode plugin add @heyimteee/ensemble@0.1.0
+```
+
+Run `/ensemble` or the **Open Ensemble** palette command. Do not also load the same plugin from `.opencode/plugins/`; that creates a duplicate plugin ID.
+
+### Install from a checkout
+
+Until the first release, add the repository to `opencode.json`:
 
 ```jsonc
 {
@@ -45,8 +61,6 @@ Add the repository to `opencode.json`:
   "plugins": ["/home/you/dev/ensemble"]
 }
 ```
-
-Run `/ensemble` or the **Open Ensemble** palette command. Do not also load the same plugin from `.opencode/plugins/`; that creates a duplicate plugin ID.
 
 If the plugin was already loaded before updating the package exports, run `opencode reload` or restart the OpenCode service.
 
@@ -178,7 +192,7 @@ Every requested directory is queried on the **one selected service**, sequential
 
 ## Known limitations
 
-- **Distribution and license are pending.** The package is private at version `0.1.0`; it is not published to a registry, and no license has been selected. Public repository visibility does not grant an open-source license.
+- **Distribution is pending.** The package is `@heyimteee/ensemble` at version `0.1.0` under the MIT license; it is not published to a registry yet.
 - **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 on Linux/tmux are tested. Other host releases load with a runtime warning but are untested, and macOS/Herdr and Windows remain unverified. See the [support matrix](docs/support/support-matrix.md) for the evidence and platform boundary.
 - **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. Every PR runs the deterministic fake, size, lifecycle, subagent, native-first, Vera, tool-surface, multi-location, and latency-smoke jobs; the real-model `npm run test:live` acceptance is opt-in in the nightly workflow (`ENSEMBLE_NIGHTLY_REAL=1`) and is never part of the PR gate.
 - **Terminal accessibility depends on the host.** Screen-reader output, high-contrast modes, font scaling, and mouse drag-copy are host features. Ensemble supplies glyph-and-word status, reduced-motion, `NO_COLOR`, and ASCII fallbacks; see the [terminal accessibility checklist](docs/verification/terminal-accessibility-checklist.md).
@@ -215,4 +229,4 @@ Every requested directory is queried on the **one selected service**, sequential
 
 ## License
 
-A license has not been selected. Public repository visibility does not grant an open-source license.
+Ensemble is released under the [MIT License](LICENSE). Contributions are accepted under the same license.

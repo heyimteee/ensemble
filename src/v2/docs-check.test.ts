@@ -12,6 +12,7 @@ const repoRoot = fileURLToPath(new URL("../..", import.meta.url))
 const COPIED_PATHS = [
   "package.json",
   "README.md",
+  "LICENSE",
   "scripts/README.md",
   "docs/README.md",
   "docs/implementation.md",
@@ -138,6 +139,71 @@ test("docs-check rejects an untested OpenCode host claim", () => {
     assert.equal(result.status, 1)
     assert.match(result.stderr, /README\.md/)
     assert.match(result.stderr, /2\.2\.6/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a README that drops the MIT license claim", () => {
+  const root = fixtureRepo()
+  try {
+    replace(root, "README.md", "Ensemble is released under the [MIT License](LICENSE).", "The license is undecided.")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md.*MIT/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a stale no-license claim", () => {
+  const root = fixtureRepo()
+  try {
+    replace(
+      root,
+      "README.md",
+      "## License\n\nEnsemble is released under the [MIT License](LICENSE).",
+      "## License\n\nA license has not been selected.",
+    )
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md.*license has not been selected/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects an install command that does not match the package name", () => {
+  const root = fixtureRepo()
+  try {
+    replaceAll(root, "README.md", "opencode plugin add @heyimteee/ensemble", "opencode plugin add ensemble")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md.*@heyimteee\/ensemble/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a package license that is not MIT", () => {
+  const root = fixtureRepo()
+  try {
+    replace(root, "package.json", '"license": "MIT"', '"license": "Apache-2.0"')
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /package\.json.*MIT/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a missing LICENSE file", () => {
+  const root = fixtureRepo()
+  try {
+    rmSync(join(root, "LICENSE"))
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /LICENSE: file is missing/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

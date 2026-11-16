@@ -227,13 +227,30 @@ function checkDocs(root = REPO_ROOT) {
       ...(testedNodeClaim ? [testedNodeClaim] : []),
       OPENCODE_PLUGIN_PEER_RANGE,
       `contract v${version}`,
+      "Ensemble is released under the [MIT License](LICENSE).",
     ],
     failures,
   )
-  rejectClaims("README.md", readme, ["not published, versioned, or licensed"], failures)
+  rejectClaims(
+    "README.md",
+    readme,
+    [
+      "not published, versioned, or licensed",
+      "no license has been selected",
+      "A license has not been selected",
+      "package is private",
+      "No npm package or license",
+    ],
+    failures,
+  )
   requireCurrentContractClaims("README.md", readme, failures)
   requireCurrentNodeFloors("README.md", readme, failures)
   requireSupportedHostClaims("README.md", readme, failures)
+
+  // Ticket #269 owns the license and package identity contract: the README
+  // install command, LICENSE text, and package metadata must agree.
+  const license = read(root, "LICENSE", failures)
+  requireClaims("LICENSE", license, ["MIT License", "Permission is hereby granted"], failures)
 
   const docsIndex = read(root, "docs/README.md", failures)
   requireClaims("docs/README.md", docsIndex, [`v${version} roster contract`], failures)
@@ -288,16 +305,30 @@ function checkDocs(root = REPO_ROOT) {
   // constants. Keeping these checks here is deliberate, not a scope leak.
   const packageJson = read(root, "package.json", failures)
   if (packageJson) {
-    let engines = ""
+    let pkg
     try {
-      engines = JSON.parse(packageJson)?.engines?.node ?? ""
+      pkg = JSON.parse(packageJson)
     } catch {
       failures.push("package.json: not valid JSON")
     }
-    if (engines !== `>=${MINIMUM_NODE_VERSION}`) {
-      failures.push(
-        `package.json: engines.node ${JSON.stringify(engines)} does not match >=${MINIMUM_NODE_VERSION}`,
-      )
+    if (pkg) {
+      const engines = pkg.engines?.node ?? ""
+      if (engines !== `>=${MINIMUM_NODE_VERSION}`) {
+        failures.push(
+          `package.json: engines.node ${JSON.stringify(engines)} does not match >=${MINIMUM_NODE_VERSION}`,
+        )
+      }
+      if (pkg.license !== "MIT") {
+        failures.push(`package.json: license ${JSON.stringify(pkg.license)} does not match MIT`)
+      }
+      if (pkg.private === true) {
+        failures.push("package.json: a publishable package must not set private")
+      }
+      if (typeof pkg.name !== "string" || pkg.name.length === 0) {
+        failures.push("package.json: name is missing")
+      } else {
+        requireClaims("README.md", readme, [`opencode plugin add ${pkg.name}`], failures)
+      }
     }
   }
 
