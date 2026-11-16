@@ -221,6 +221,7 @@ Every requested directory is queried on the **one selected service**, sequential
 - [v2 specification](https://github.com/heyimteee/ensemble/issues/17)
 - [v2 tickets](https://github.com/heyimteee/ensemble/issues)
 - [OpenCode host support range](docs/compatibility/opencode-host-range.md): supported CLI releases, peer range, and runtime warning
+- [Scale, soak, and local diagnostics](docs/operations/scale-and-monitoring.md): operating envelope, soak/leak harness, support bundle, and no-telemetry policy
 - [OpenCode 2.2.1 compatibility report](docs/compatibility/opencode-2.2.1.md): historical extension behavior, constraints, and gaps
 - [OpenTUI assessment](docs/assessments/opentui.md)
 - [Glossary](GLOSSARY.md)

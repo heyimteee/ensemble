@@ -33,6 +33,8 @@ const DEV_ONLY = new Set([
   "live-matrix.ts",
   "prompt-benchmark.ts",
   "release.ts",
+  "soak-metrics.ts",
+  "support-bundle.ts",
   "test-service.ts",
 ])
 

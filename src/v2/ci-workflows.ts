@@ -28,6 +28,7 @@ export const PR_JOB_BUDGET_MINUTES: Readonly<Record<string, number>> = {
 /** Nightly job budgets in minutes. */
 export const NIGHTLY_JOB_BUDGET_MINUTES: Readonly<Record<string, number>> = {
   "latency-reference": 30,
+  "soak-smoke": 20,
   real: 30,
 }
 

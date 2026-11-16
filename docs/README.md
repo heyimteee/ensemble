@@ -6,6 +6,7 @@
 - [Changelog](../CHANGELOG.md): release scaffolding; the tag-driven workflow uses the matching version section as the GitHub release body
 - [Domain glossary](../GLOSSARY.md)
 - [Implementation and acceptance notes](implementation.md)
+- [Scale, soak, and local diagnostics](operations/scale-and-monitoring.md): operating envelope, soak/leak harness, support bundle, and no-telemetry policy
 - [v2 product specification #17](https://github.com/heyimteee/ensemble/issues/17): workspace group chat, subtasks, leader routing, and native-session drill-down
 - [v2 implementation tickets #18–#29](https://github.com/heyimteee/ensemble/issues): independently verifiable slices with blockers
 - [Historical v1 specification #1](https://github.com/heyimteee/ensemble/issues/1)
@@ -59,6 +60,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Built package for the installed TUI plugin](verification/2026-11-16-ticket-279.md): the Solid-compiled `dist` build, runtime dependency resolution in the plugin cache, the passing `0.1.0-rc.2` TUI route and `/ensemble` command, and the runtime-only pack guard
 - [Security and privacy audit](verification/2026-11-16-ticket-271.md): threat model and permission review, the handoff symlink containment fix, `npm audit` baseline and accepted risks, Dependabot configuration, and the passing verify/docs gates
 - [Backup/restore and upgrade/rollback](verification/2026-11-16-ticket-273.md): the versioned backup document, the service RPC and operator CLI, the automatic rollback slot, the injected-failure recovery rehearsal, restored-state doctor compatibility, and the upgrade/rollback guides
+- [Scale/soak and local diagnostics](verification/2026-11-16-ticket-276.md): the fake soak harness and smoke record, the tested operating envelope, the redacted support bundle, the no-telemetry policy, and the settled native-session cap fix
 - [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
 - [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
 - [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix

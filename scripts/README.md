@@ -233,11 +233,14 @@ without letting one job hang indefinitely.
 | Job | Suites | Timeout | Observed |
 | --- | --- | ---: | ---: |
 | `latency-reference` | `test:live:latency` (`reference` profile: 50 ms rail, 250 ms card) | 30 min | ~3 min |
+| `soak-smoke` | `npm run soak:smoke` (180 s observe-only record; the 4-hour gate is opt-in) | 20 min | ~4 min |
 | `real` | `test:live` with the real host catalog; opt-in via the `real` dispatch input or `ENSEMBLE_NIGHTLY_REAL=1` | 30 min | ~3 min |
 
 The schedule is `17 4 * * *`; `workflow_dispatch` allows a manual run. The
 real-model job is skipped unless opted in, so credentials and model cost stay
-controlled. Nightly wall-clock budget is 60 minutes with both jobs.
+controlled. Nightly wall-clock budget is 80 minutes with all jobs; the soak
+smoke record uploads even on success, and the full multi-hour gate remains a
+manual/opt-in run recorded in a verification record.
 
 ### Kept separate
 
@@ -367,6 +370,24 @@ the genuine FAILED card. `fake-subagent-parent-fixture` emits one native
 the parent barrier and Work card. A one-shot init pre-stream pause keeps the
 indeterminate System Agent row observable, and a pre-stream turn pause keeps
 the transient `Asking $Name…` window observable on the narrower chat cell.
+
+## Soak and support bundle
+
+`npm run soak:smoke` is the short local/CI observation (180 s, observe-only).
+`npm run soak` is the default 4-hour enforced gate (nightly/opt-in). Both start
+an isolated fake host, create agents and one-directory-per-workspace fixtures,
+send real `message.send` work, and write `soak.jsonl` plus
+`soak-summary.json` under `ENSEMBLE_SOAK_OUT`. The record has counts, process
+RSS, store bytes, diagnostic payload size/latency, queue/native state, and
+log-sink counters only; titles, instructions, text, file bytes, and private
+paths never enter it. See
+[docs/operations/scale-and-monitoring.md](../docs/operations/scale-and-monitoring.md)
+for the gate, knobs, and the recorded envelope.
+
+`npm run support:bundle -- --out DIR` collects redacted local evidence:
+`doctor.json`, `logs-summary.json`, bounded warn/error/failure log rows, a log
+inventory, and the service descriptor with the password redacted. There is no
+upload. Review the files before attaching them to an issue.
 
 ## Size matrix
 
