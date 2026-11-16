@@ -152,6 +152,19 @@ function hasPreflight(block: string): boolean {
   return /\bnpm run test:live:preflight\b/.test(block)
 }
 
+/**
+ * Ticket #285: package exports load `dist/`, so a live workflow or composite
+ * action must build the runtime after `npm ci` and before the first host
+ * command. A fresh checkout otherwise has no `dist` and the plugin never
+ * activates.
+ */
+function hasRuntimeBuild(block: string): boolean {
+  const install = block.search(/\bnpm ci\b/)
+  const build = block.search(/\bnpm run build\b/)
+  const firstLive = block.search(/\bnpm run test:live:/)
+  return install >= 0 && build > install && (firstLive < 0 || build < firstLive)
+}
+
 function suitesIn(block: string): string[] {
   const suites = [...block.matchAll(/npm run (test:live:[a-z0-9:-]+)/g)]
     .map((match) => match[1]!)
@@ -512,6 +525,9 @@ export function checkLiveHostAction(text: string): string[] {
   if (!/\bnpm ci\b/.test(text)) {
     failures.push(`${file}: npm ci is missing`)
   }
+  if (!hasRuntimeBuild(text)) {
+    failures.push(`${file}: npm run build must follow npm ci (package exports load dist/)`)
+  }
   if (/@opencode\/cli@\d/.test(text) || /fd-v\d+\.\d+\.\d+/.test(text)) {
     failures.push(`${file}: tool versions must not be hardcoded`)
   }
@@ -544,6 +560,9 @@ export function checkCompatibilityWorkflow(text: string, supportedHosts: readonl
   }
   for (const required of ["npm run test:live:probe", "npm run test:live:fake:all"]) {
     if (!text.includes(required)) failures.push(`${file}: missing ${required}`)
+  }
+  if (!hasRuntimeBuild(text)) {
+    failures.push(`${file}: npm run build must follow npm ci and precede the host probe (exports load dist/)`)
   }
   if (!/ENSEMBLE_LIVE_EXPECT_OPENCODE:\s*\$\{\{\s*matrix\.opencode\s*\}\}/.test(text)) {
     failures.push(`${file}: preflight must expect matrix.opencode`)

@@ -34,6 +34,10 @@ jobs:
       - name: Install OpenCode
         run: npm install --global "@opencode/cli@${{ matrix.opencode }}"
       - run: npm ci
+      # Ticket #285: package exports load dist/, so the host probe and fake
+      # smoke need the runtime build in a fresh checkout.
+      - name: Build runtime
+        run: npm run build
       - name: Preflight host tools
         env:
           ENSEMBLE_LIVE_REQUIRE: "1"
