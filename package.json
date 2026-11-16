@@ -25,6 +25,8 @@
     "test:live:fake:all": "bash scripts/live-matrix.sh fake",
     "test:live:all": "bash scripts/live-matrix.sh all",
     "test:live:latency": "bash scripts/live-latency-probe.sh",
+    "test:live:latency:reference": "ENSEMBLE_LATENCY_PROFILE=reference bash scripts/live-latency-probe.sh",
+    "latency:budget": "node --experimental-strip-types scripts/latency-budget.mjs",
     "test:live:sizes": "bash scripts/live-size-matrix.sh",
     "test:live:lifecycle": "bash scripts/live-lifecycle-fake.sh",
     "test:live:subagent": "bash scripts/live-subagent-probe.sh",

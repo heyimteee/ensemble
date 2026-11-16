@@ -1,0 +1,97 @@
+name: Latency
+
+on:
+  pull_request:
+  schedule:
+    # Nightly reference-host budget gate. The pure evaluator runs in Verify on
+    # every PR; this job is the stable live measurement.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "26.12.1"
+  OPENCODE_VERSION: "2.2.7"
+
+jobs:
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux
+      - name: Install OpenCode
+        run: npm install --global "@opencode/cli@${OPENCODE_VERSION}"
+      - run: npm ci
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+        run: npm run test:live:preflight
+      - name: Latency smoke budget
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LATENCY_PROFILE: smoke
+          ENSEMBLE_LATENCY_SAMPLES: "10"
+          ENSEMBLE_LATENCY_CARD_SAMPLES: "5"
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+          ENSEMBLE_LATENCY_OUT: ${{ runner.temp }}/ensemble-live-artifacts/latency-result.json
+        run: npm run test:live:latency
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-smoke-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
+
+  reference:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux
+      - name: Install OpenCode
+        run: npm install --global "@opencode/cli@${OPENCODE_VERSION}"
+      - run: npm ci
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+        run: npm run test:live:preflight
+      - name: Reference-host latency budget
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LATENCY_PROFILE: reference
+          ENSEMBLE_LATENCY_SAMPLES: "20"
+          ENSEMBLE_LATENCY_CARD_SAMPLES: "10"
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+          ENSEMBLE_LATENCY_OUT: ${{ runner.temp }}/ensemble-live-artifacts/latency-result.json
+        run: npm run test:live:latency
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-reference-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore

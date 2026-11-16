@@ -121,13 +121,17 @@ budget and quarantine rules are in
   stalled/retrying labels remain service/TUI-seam tests because no public live
   RPC can inject those durable states; the script logs those skips. Expect
   about six minutes.
-- `npm run test:live:latency`: a reproducible keypress-to-repaint probe on the
-  isolated fake host. It reports min/p50/p95/max/mean and raw samples for the
-  grouped rail `j`/`k` navigation and for delegation-card appearance
-  (`task.delegate` RPC to the first capture showing the right-pane Work card
-  title); it is a measurement, not a pass/fail threshold. Set
-  `ENSEMBLE_LATENCY_SAMPLES` (default 10) for rail samples and
-  `ENSEMBLE_LATENCY_CARD_SAMPLES` (default 5) for card samples.
+- `npm run test:live:latency`: the latency budget probe on the isolated fake
+  host. It gates rail keypress p95 (50 ms reference) and the deterministic
+  patch-card p95 (250 ms reference), and reports first-token only. The
+  patch-card fixture reads the durable `changes.since` patch and renders the
+  real Work-card mapping without waiting for a model token. The default
+  `smoke` profile uses generous PR thresholds; `npm run
+  test:live:latency:reference` runs the strict reference gate.
+  `ENSEMBLE_LATENCY_SAMPLES` (default 10) and
+  `ENSEMBLE_LATENCY_CARD_SAMPLES` (default 5) control the sample counts;
+  `ENSEMBLE_LATENCY_REGRESSION_MS` injects a deliberate regression that must
+  fail the gate. See [the budget policy](../docs/verification/latency-budget.md).
 - `npm run test:live:fake:empty`: same isolated fake provider, but configured
   with no models. Walks the New-agent wizard through the empty one-by-one
   memory list to the Main model step and asserts the explained empty state
@@ -260,17 +264,35 @@ visual tests.
 ## Latency probe
 
 `npm run test:live:latency` starts the isolated fake provider, server, and TUI,
-creates one agent and one workspace through the RPC surface, then times rail
-`j`/`k` cursor moves from `tmux send-keys` until a pane capture first shows the
-cursor on the target row. It then opens the workspace and times `task.delegate`
-RPC invocations until the first capture shows the new Work card title. It
-reports raw samples plus min/p50/p95/max/mean and both measurement boundaries.
-`ENSEMBLE_LATENCY_SAMPLES` controls the rail sample count and
-`ENSEMBLE_LATENCY_CARD_SAMPLES` the card sample count.
+creates one agent and one workspace through the RPC surface, then measures:
 
-The number includes tmux send/capture overhead, so compare runs from the same
-machine and terminal host rather than treating it as pure render time. The
-probe measures and exits; it does not assert a latency threshold.
+- `rail`: rail `j`/`k` cursor moves from `tmux send-keys` until a pane capture
+  first shows the cursor on the target row. This includes tmux send/capture
+  overhead; compare runs from the same machine and terminal host.
+- `patchCard`: a deterministic headless fixture. It invokes `task.delegate`,
+  reads the durable `changes.since` patch after that version, applies the
+  subtask changes to a client-side state map, and renders the real
+  `workCardForTask` mapping. It never waits for a model token, so the fake
+  provider's hold cannot dominate the card number.
+- `firstToken`: the `task.delegate` RPC to the first visible model reply. It is
+  report only; a slow model is not a slow UI.
+
+The default `smoke` profile gates rail p95 at 500 ms and patch-card p95 at
+5000 ms for shared PR runners. The reference gate is strict:
+
+```sh
+ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:latency:reference
+ENSEMBLE_LATENCY_PROFILE=reference ENSEMBLE_LATENCY_SAMPLES=20 \
+  ENSEMBLE_LATENCY_CARD_SAMPLES=10 npm run test:live:latency
+```
+
+`ENSEMBLE_LATENCY_SAMPLES` controls the rail count and
+`ENSEMBLE_LATENCY_CARD_SAMPLES` the patch-card count.
+`ENSEMBLE_LATENCY_REGRESSION_MS=1000` adds a deliberate per-sample regression
+and must fail the reference gate. `ENSEMBLE_LATENCY_OUT` selects the result
+JSON path; CI uploads it with the redacted failure artifacts. The pure
+evaluator and profiles are documented in
+[docs/verification/latency-budget.md](../docs/verification/latency-budget.md).
 
 The fake provider is infrastructure only and is never imported by the plugin.
 It implements `/v1/models` and `/v1/chat/completions` (also without `/v1`).
