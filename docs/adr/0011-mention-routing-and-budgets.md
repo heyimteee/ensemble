@@ -2,8 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-10
-- **Updated:** 2026-11-11 (contract v6 and roster, #238)
-- **Tickets:** spec #209, tickets #211, #238 in `heyimteee/ensemble`
+- **Updated:** 2026-11-12 (contract v7 terminal-turn workflow, #253)
+- **Tickets:** spec #209, tickets #211, #238, #253 in `heyimteee/ensemble`
 - **Supersedes:** none
 - **Related:** [ADR 0001](0001-native-skill-boundary.md), [ADR 0003](0003-single-service-and-safe-recovery.md), [ADR 0004](0004-dispatch-budgets-and-continuation.md), [ADR 0009](0009-conversation-identity-and-sessions.md), [ADR 0010](0010-native-turn-ingestion.md)
 
@@ -154,15 +154,18 @@ are unchanged.
 
 ### 8. The workspace contract states the grammar and the roster
 
-The versioned `AGENTS.md` block is the durable statement of this ADR. Contract
-v6 says the final native text is the group message; `$Name` routes work while a
-bare name is only a reference; `@path` is file-only; code, URLs, and paths never
-route; direct conversations are one-to-one; and the server owns routing,
-budgets, and completion. It requires an agent not to claim a teammate replied
-until that member's turn is visible, and not to open a second completion loop
-for a teammate it asked. The old rule that every non-leader turn must end with
-a handoff is removed; explicit `delegate` and `handoff` are migration and
-rollback tools, not the normal chat path.
+The versioned `AGENTS.md` block is the durable statement of this ADR.
+Contract v7 says the final native text is the group message; `$Name` routes
+work while a bare name is only a reference; `@path` is file-only; code, URLs,
+and paths never route; direct conversations are one-to-one; and the server owns
+routing, budgets, and completion. It requires an agent not to claim a teammate
+replied until that member's turn is visible, and not to open a second
+completion loop for a teammate it asked. It adds the terminal-turn workflow:
+one synthesis per command at the command root, terminal turns treat `$Name` as
+a reference, and `ensemble_dispatch` starts the next ticket as a new command
+root. The old rule that every non-leader turn must end with a handoff is
+removed; explicit `delegate` and `handoff` are migration and rollback tools,
+not the normal chat path.
 
 The block also carries one generated `Team roster` table. Active members only:
 the leader first and marked, then the remaining members in `memberIDs` order,
@@ -237,7 +240,8 @@ markers is preserved, and a newer recorded version is never downgraded.
   retirement. #238 covers contract v6, roster rendering and escaping,
   content-aware reconciliation, and the refresh triggers
   (`src/v2/init-block.test.ts`, `src/v2/workspace-config.test.ts`,
-  `src/v2/service.test.ts`).
+  `src/v2/service.test.ts`); #253 covers the contract v7 terminal-turn
+  workflow.
 - The [native host contract](../verification/2026-11-10-native-host-contract.md)
   supplies the turn and delivery identities routing depends on.
 - `npm run verify` passes for this documentation ticket. No product behavior

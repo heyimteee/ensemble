@@ -2,9 +2,9 @@
 
 > **v3 UI and streaming pass.** The v3 work adds real delta streaming, inline composer completions, a searchable member checklist, semantic theme tokens, focus borders, git metadata, and the visible `I` init shortcut. The v2 runtime model and authority boundaries are unchanged.
 
-Status: **developer preview**, compatibility verified on OpenCode 2.2.6 and 2.2.7. The v2 runtime is the default. The v1 preview was removed. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence; see the [host support range](compatibility/opencode-host-range.md).
+Status: **developer preview**, compatibility verified on OpenCode 2.2.6 and 2.2.7. The v2 runtime is the default. The v1 preview was removed. The shipped `AGENTS.md` contract v7 (`ENSEMBLE_BLOCK_VERSION = 7`) is the current block; Node 22.23.4 or newer is required for the unit/typecheck gate, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence; see the [host support range](compatibility/opencode-host-range.md).
 
-> **Native-first decisions (2026-11-10).** [ADR 0009](adr/0009-conversation-identity-and-sessions.md), [ADR 0010](adr/0010-native-turn-ingestion.md), and [ADR 0011](adr/0011-mention-routing-and-budgets.md) record the decided conversation/session, ingestion, and routing model. Where this document describes the current v2 path that differs (one workspace session per agent, a DM reusing it, TUI transcript reads, explicit `maxHops`), the ADR is authoritative for the target; implementation lands under tickets #212–#227.
+> **Native-first decisions (2026-11-10).** [ADR 0009](adr/0009-conversation-identity-and-sessions.md), [ADR 0010](adr/0010-native-turn-ingestion.md), and [ADR 0011](adr/0011-mention-routing-and-budgets.md) record the decided conversation/session, ingestion, and routing model. Native-first is the default; the legacy explicit-tool path remains only as the documented rollback. Where this document describes an older v2 path, the ADR is authoritative for the target and the current implementation section describes the shipped behavior.
 
 ## Architecture
 
@@ -61,7 +61,7 @@ Workspace {
 
 - One canonical directory maps to one active workspace.
 - Switching workspace changes the chat, Work pane, and directory for new runs.
-- Sessions are bound to `workspace + agent` in the current path; [ADR 0009](adr/0009-conversation-identity-and-sessions.md) replaces that key with a conversation binding.
+- Sessions are bound to a conversation (workspace group or direct) and agent per [ADR 0009](adr/0009-conversation-identity-and-sessions.md); the older `workspace + agent` key is migration history.
 - `<workspace>/.ensemble/config.json` is authoritative for workspace name, leader, members, synthesis, and paused state. OpenCode storage remains authoritative for agents, messages, subtasks, approvals, memories, bindings, and history.
 - Valid config files discovered in a directory register a workspace automatically; invalid config is rejected and the last good state is kept.
 - `.ensemble/` is created when a workspace is created, is added to `.gitignore`, and contains only config, handoffs, and init metadata. Conversation history stays in OpenCode storage.
@@ -112,7 +112,7 @@ Agent {
 
 ## Group chat
 
-Native-first target: `$Name` in sanitized native prose is the routing operator; the current tool path below remains during migration. See [ADR 0011](adr/0011-mention-routing-and-budgets.md).
+`$Name` in sanitized native prose is the routing operator on the default native-first path; the explicit tool path below remains available only as the documented rollback. See [ADR 0011](adr/0011-mention-routing-and-budgets.md).
 
 The transcript is shared and attributed:
 
@@ -173,13 +173,13 @@ The authoritative boundary and its trade-offs are recorded in [ADR 0001: Native-
 
 ## Direct chats and sessions
 
-Native-first target: each direct conversation has its own native session and Work history; the current path below reuses the workspace session until #214. See [ADR 0009](adr/0009-conversation-identity-and-sessions.md).
+Each direct conversation has its own native session and Work history ([ADR 0009](adr/0009-conversation-identity-and-sessions.md)); the older path that reused the workspace session is migration history.
 
-- Every agent has a direct chat. If the agent belongs to the active workspace, the DM uses that workspace’s native session; otherwise it uses a no-workspace session in `~/.ensemble/agents/<id>/`.
+- Every agent has a direct chat. A workspace direct session runs in the workspace directory; a home direct session runs under `~/.ensemble/agents/<id>/`. A direct session never shares the workspace group session.
 - Direct chat messages are queued while the agent is running and flushed when the native session becomes idle.
 - Native session transcripts are authoritative; Ensemble stores only queue and UI state.
 - A Direct conversation accepts the DM agent's own assigned `/skill` tokens. General skills are rejected with a pointer to the workspace group chat, where the leader can triage them.
-- Adding an agent with no workspace to a workspace can move its session with `session.move`; `/cd` is the human-facing equivalent in OpenCode 2.2.2.
+- Adding an agent with no workspace to a workspace can move its session with `session.move`; the host's `/cd` command is the human-facing equivalent.
 
 ## Configuration and init
 
@@ -900,8 +900,8 @@ never committed. They must not be attached to public issues without review.
 - Multiple OpenCode locations synchronize roster, workspace membership, and bindings through the shared service/store plus config reconciliation. Messages and active runs remain owned by the instance handling them.
 - Direct chats read the native OpenCode session context and render it in the Ensemble transcript; `o` opens the native session route. There is no separate Ensemble DM store, search, or export.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
-- macOS/Herdr behavior remains unverified in v5.8: the environment is Linux/tmux. The collision-free shortcut intent, inline leader label on that host, `Esc`/`Ctrl+G` under a live native run, System Agent live progress, the `/` and `$Agent /` palettes, and `/init` under Herdr remain a manual check.
+- macOS/Herdr behavior remains unverified: the environment is Linux/tmux. The collision-free shortcut intent, inline leader label on that host, `Esc`/`Ctrl+G` under a live native run, System Agent live progress, the `/` and `$Agent /` palettes, and `/init` under Herdr remain a manual check.
 - Real mouse-drag copy remains manual because tmux does not reliably inject drag gestures; the pane-bound selection/copy policy is unit-covered.
 - The host keeps old plugin pages mounted; the route gate prevents stale key ownership but cannot force the host to dispose them.
-- The large TUI application component remains a follow-up; v5.8 did not split it.
-- No npm package, versioning policy, or license has been selected.
+- The large TUI application component remains a follow-up.
+- No npm package or license has been selected; `package.json` is private at version 0.1.0, which is not a published release.

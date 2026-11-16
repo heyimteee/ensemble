@@ -19,7 +19,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [ADR 0001: Native-skill boundary](adr/0001-native-skill-boundary.md): why Ensemble routes native skills instead of executing them
 - [ADR 0009: Conversation identity and sessions](adr/0009-conversation-identity-and-sessions.md): one native session per agent per conversation, adoption, and isolation
 - [ADR 0010: Native turn ingestion](adr/0010-native-turn-ingestion.md): service-owned, identity-based messages and Work
-- [ADR 0011: Mention routing and budgets](adr/0011-mention-routing-and-budgets.md): `$Name` grammar, sanitization, server-owned budgets, and the v6 roster contract
+- [ADR 0011: Mention routing and budgets](adr/0011-mention-routing-and-budgets.md): `$Name` grammar, sanitization, server-owned budgets, and the v7 roster contract
 - [Agent instructions](../AGENTS.md)
 - [Handoff contract](agents/handoff.md): server-owned completion, migration handoff, batch-review, loop-guard, and mention rules
 - [OpenCode/OpenTUI runtime guide](agents/opencode-tui-runtime.md): host contracts, source navigation, and verification
@@ -33,6 +33,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
+- [Documentation freshness](verification/2026-11-12-ticket-262.md): canonical contract/host/Node constants, the docs index, ADR 0011 at contract v7, and the `docs:check` CI gate
 - [Node support policy and CI matrix](verification/2026-11-12-node-matrix.md): `npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1, the `>=22.23.4` engine floor, the load-time version gate, and the separate Node matrix workflow
 - [Accessibility audit](verification/2026-11-12-ticket-259.md): contrast matrix for dark/light/custom themes, non-color Work status, keyboard-only reachability, reduced-motion/`NO_COLOR`/ASCII fallbacks, and the ASCII glyph fix
 - [Terminal accessibility checklist](verification/terminal-accessibility-checklist.md): manual screen-reader, high-contrast, font-scaling, reduced-motion, ASCII, keyboard-only, and host-limit checks
@@ -42,12 +43,20 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Contract v6 and team roster](verification/2026-11-11-ticket-238.md): native-first rules, generated roster table, content-aware reconciliation, refresh triggers, and the measured prompt delta
 - [Contract v7 terminal-turn workflow](verification/2026-11-12-ticket-253.md): root-only synthesis, terminal-turn references, `ensemble_dispatch` continuation, regenerated repository block, and the passing Vera regression
 - [Native-first full E2E](verification/2026-11-12-e2e.md): all 12 unit/live suites passing on OpenCode 2.2.7, including the real TUI acceptance
+- [Native ingestion state and AGENTS v7 full E2E](verification/2026-11-12-native-ingestion-v7-e2e.md): the 13-suite matrix on OpenCode 2.2.7 covering native ingestion, the v7 terminal-turn contract, Vera, accessibility sizes, and the real TUI
+- [One native ingestion state value](verification/2026-11-12-ticket-231.md): one `NativeSessionState` per session, event order, steering, retry, interruption, adoption, and restart
+- [Terminal turns and root-only synthesis E2E](verification/2026-11-11-terminal-turns-e2e.md): root synthesis, intermediate relay, terminal-turn references, dispatch continuation, and the passing full live matrix
 - [Native probe version set and stale live harness](verification/2026-11-11-ticket-233-234.md): 2.2.6/2.2.7 contract set, Native mirror settings row, and Work interaction before HISTORY
 - [Native-first review fixes](verification/2026-11-11-review-fixes.md): privacy toggle, recovered attachment chips, adoption race guard, kill-switch tool path, shadow delta, parallel ingestion, delegated prompt context, and standards cleanup
 - [Native-first cutover verification](verification/2026-11-11-native-first.md): passing live matrix for direct/workspace turns, mention routing, attachments, adoption, retry/interruption, restart/reconnect, Work history, rollback, shadow comparison, latency, and tokens
 - [Native shadow mode](verification/2026-11-11-ticket-230.md): invisible shadow ingestion, content-free comparison rows, no visible writes or routes, and the passing 65/65 + 16/16 live matrix
 - [Native prompt attachment size](verification/2026-11-11-ticket-228.md): host `data` payload derives a bounded positive chip size; live attachment check passes
 - [Native-first child-ticket evidence index](verification/2026-11-11-native-first-children.md): where each #210–#230 verification lives
+- [Retry and interruption for native turns](verification/2026-11-11-ticket-217.md): one durable turn and Work card across retry, interruption, and settlement
+- [Native reconciliation and support surface](verification/2026-11-11-ticket-218.md): reconciliation triggers, context reads, and support-surface limits
+- [Legacy direct-message transcript contract](verification/2026-11-11-ticket-226.md): one conversation-channel store for direct messages and the retired per-binding branch
+- [Compact synthesis context](verification/2026-11-11-ticket-249.md): root synthesis without the bounded group transcript
+- [Multi-ticket and token verification](verification/2026-11-11-ticket-251.md): multi-ticket roots, command-cap refusal, prompt/schema token counts, and the Vera regression
 - [Native host event contract](verification/2026-11-10-native-host-contract.md): measured OpenCode 2.2.6 order, identities, retry, interruption, background subagent, and move behavior
 - [Composer attachments](verification/2026-11-10-ticket-223.md): path and clipboard-image paste, bounded store, prompt files, transcript chips, cleanup, and terminal limits
 - [Direct native turn ingestion](verification/2026-11-10-ticket-215.md): direct durable messages, exact settlement, Work card, restart recovery, and the nativeFirst rollback
