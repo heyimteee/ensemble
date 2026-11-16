@@ -31,8 +31,15 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Contributing](../CONTRIBUTING.md)
 - [Security](../SECURITY.md)
 
+## Support
+
+- [Support policy](support/README.md): channel, response expectations, evidence, and redaction rules
+- [Incident runbook](support/incident-runbook.md): symptoms, diagnostics, package rollback, escalation, and data recovery
+- [Support matrix and known limitations](support/support-matrix.md): Linux/tmux, macOS/Herdr, Windows, OpenCode/Node ranges, and live-suite prerequisites
+
 ## Verification
 
+- [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
 - [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
 - [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
 - [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
