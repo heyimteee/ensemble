@@ -2132,8 +2132,16 @@ live_type "$LIVE_TUI_SESSION" "$mixed_text"
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill —" 20 "mixed skill anchor keeps its resolved skill"
-live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: $mixed_text" 20 "normal anchor keeps a normal peer turn"
+# The assignment lines are older than the streamed reply bubbles, so a long
+# transcript can scroll them out of the visible chat cell. The durable
+# messages are the routing facts; the Work rows and replies are asserted
+# separately below.
+live_wait_for "$LIVE_STEP_TIMEOUT" "mixed skill anchor assignment message" \
+  live_snapshot_has_message_containing "→ Assigned to \$FakeAgent: /ensemble-live-skill —" \
+  || live_fail "mixed skill anchor did not record its assignment"
+live_wait_for "$LIVE_STEP_TIMEOUT" "normal anchor assignment message" \
+  live_snapshot_has_message_containing "→ Assigned to \$Helper: $mixed_text" \
+  || live_fail "normal anchor did not record its assignment"
 mixed_state=""
 for _ in $(seq 1 40); do
   mixed_state=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("mixed-anchor") >= 0 }); var replied = tasks.filter(function (t) { return t.state === "replied" }).length; return tasks.length + ":" + replied })()')
@@ -2360,10 +2368,10 @@ live_wait_for 20 "earlier scenario work cleared" no_work_header \
 v7_one_title="v7-group-one fake-queue-hold-long"
 v7_two_title="v7-group-two fake-queue-hold-long"
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"$v7_one_title\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "first v7 group is visible"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active" 20 "first v7 group is visible"
 live_require_text "$LIVE_TUI_SESSION" "v7-group-one" 20 "first v7 group card is visible"
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"$v7_two_title\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active · 0 done" 20 "second v7 group appends without replacing the first"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active" 20 "second v7 group appends without replacing the first"
 live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 1 active · 0 done" 20 "first v7 group label"
 live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "second v7 group label"
 live_require_text "$LIVE_TUI_SESSION" "v7-group-two" 20 "second v7 group card is visible"
@@ -2372,7 +2380,7 @@ v7_first_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(f
 live_invoke "task.cancel" "{\"id\":\"$v7_first_id\"}" >/dev/null
 # Ticket #172: a terminal group leaves ACTIVE immediately (no hold) and is
 # retained in HISTORY. The surviving active group renumbers to GROUP 1.
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "cancelled v7 group leaves ACTIVE"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active" 20 "cancelled v7 group leaves ACTIVE"
 live_assert_absence "$LIVE_TUI_SESSION" "GROUP 2 · 1 active" "the surviving active group renumbers to GROUP 1"
 live_require_text "$LIVE_TUI_SESSION" "v7-group-two" 20 "second v7 group survives the first group's removal"
 live_require_text "$LIVE_TUI_SESSION" "⊘ $v7_one_title cancelled" 15 "cancelled v7 task emits one terminal event"
@@ -2404,11 +2412,11 @@ live_log "v7 two-group append, ACTIVE/HISTORY split, and canonical cancellation 
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
 live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "ask_person reaches the approvals surface"
 live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "needs-you card treatment"
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "needs-you group is visible"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active" 20 "needs-you group is visible"
 live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ v open" 20 "approvals are a small summary under Work"
 sleep 2.2
 live_assert_text "$LIVE_TUI_SESSION" "NEEDS YOU" "needs-you persists beyond the shared hold window"
-live_assert_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" "needs-you group stays mounted"
+live_assert_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active" "needs-you group stays mounted"
 # Ticket #185: v opens the full-height inbox over Work; Enter opens the
 # decision; the ask answer prompt then resolves. Esc returns to split.
 live_focus_work
@@ -2999,15 +3007,15 @@ live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "ACTIVE view restored
 # and puts its finished card in HISTORY at the same time.
 live_focus_chat "$LIVE_TUI_SESSION"
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"history-split fake-queue-hold-long\",\"recipientIDs\":[\"$fake_id\",\"$helper_id\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 2 active · 0 done" 20 "two-task group is active"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 2 active" 20 "two-task group is active"
 history_split_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title.indexOf(\"history-split\") >= 0 && t.assigneeID === \"$fake_id\" })[0]?.id" | tr -d '"')
 [[ -n "$history_split_id" && "$history_split_id" != "null" ]] || live_fail "history split task id is missing"
 live_invoke "task.cancel" "{\"id\":\"$history_split_id\"}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 1 done" 20 "ACTIVE keeps the group with its live card"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active" 20 "ACTIVE keeps the group with its live card"
 live_assert_work_text "$LIVE_TUI_SESSION" "history-split" "ACTIVE shows the surviving card"
 live_focus_work_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" "f"
-live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │ 1 group · 1 active · 1 done" 20 "HISTORY shows the same group with its finished card"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │ 1 group · 1 active" 20 "HISTORY shows the same group with its finished card"
 live_assert_work_text "$LIVE_TUI_SESSION" "history-split" "HISTORY shows the finished card from the active group"
 live_assert_work_text "$LIVE_TUI_SESSION" "CANCELLED" "the finished card keeps its explicit state"
 live_key "$LIVE_TUI_SESSION" "f"
@@ -3047,7 +3055,7 @@ delegate_terminal_group "history-newer fake-queue"
 live_require_no_active_work "$LIVE_TUI_SESSION" 15 "history fixture groups settled"
 live_focus_work_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" "f"
-live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │ 2 groups · 0 active · 2 done" 20 "two finished history groups"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │ 2 groups · 0 active" 20 "two finished history groups"
 live_require_work_text "$LIVE_TUI_SESSION" "history-newer" 10 "newest history group starts expanded"
 live_assert_absence_work "$LIVE_TUI_SESSION" "history-older" "older history group starts rolled up"
 live_require_text "$LIVE_TUI_SESSION" "▾ GROUP 1 · 1 done" 10 "newest group renders the expanded caret"

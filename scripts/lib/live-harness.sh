@@ -1350,10 +1350,10 @@ live_type() {
   before=$(live_capture "$session")
   "$LIVE_TMUX_BIN" send-keys -l -t "$session" -- "$text"
   # A long line wraps and a whole-string or whole-token match would never
-  # appear contiguously. The last six non-space characters always sit on the
-  # final rendered line, so they are the commit marker; the pane change proves
-  # the input had an effect even when that suffix already existed elsewhere.
-  token=$(printf '%s' "$text" | awk '{ value = value $0 } END { sub(/[ \t]+$/, "", value); print substr(value, length(value) - 5) }')
+  # appear contiguously. The last four non-space characters are short enough to
+  # survive a wrap at the final line boundary; the pane change proves the input
+  # had an effect even when that suffix already existed elsewhere.
+  token=$(printf '%s' "$text" | awk '{ value = value $0 } END { sub(/[ \t]+$/, "", value); print substr(value, length(value) - 3) }')
   [[ -n "$token" ]] || token="$text"
   live_wait_for "$LIVE_TYPE_TIMEOUT" "typed text in the TUI" live_type_visible "$session" "$token" "$before" \
     || live_fail_timing "typed text did not reach the TUI: $text"
@@ -1521,6 +1521,22 @@ live_snapshot_has_workspace_named() {
     const workspaces = Object.values(output.state?.workspaces ?? {});
     process.exit(workspaces.some((workspace) => workspace.name === process.argv[1] && !workspace.archived) ? 0 : 1);
   ' "$name" >/dev/null 2>&1
+}
+
+# Transcript lines are also durable messages. A long transcript can scroll a
+# system assignment line out of the visible chat cell while its product state
+# remains exact; this predicate observes that state without depending on the
+# current scroll position.
+live_snapshot_has_message_containing() {
+  local text="$1" output
+  output=$(live_snapshot 2>/dev/null | live_snapshot_output 2>/dev/null) || return 1
+  [[ -n "$output" ]] || return 1
+  printf '%s' "$output" | "$LIVE_NODE_BIN" -e '
+    const output = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    const text = process.argv[1];
+    const messages = Object.values(output.state?.messages ?? {}).flat();
+    process.exit(messages.some((message) => typeof message.text === "string" && message.text.includes(text)) ? 0 : 1);
+  ' "$text" >/dev/null 2>&1
 }
 
 live_snapshot_value() {
