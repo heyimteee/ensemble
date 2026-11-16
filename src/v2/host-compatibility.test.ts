@@ -40,8 +40,16 @@ test("the peer range covers every tested host API and matches package.json", () 
     assert.match(OPENCODE_PLUGIN_PEER_RANGE, new RegExp(`(^|\\|\\| )${version.replaceAll(".", "\\.")}($| \\|\\|)`))
     assert.equal(OPENCODE_PLUGIN_VERSION_BY_HOST[version], version)
   }
-  for (const peer of ["@opencode/plugin", "@opentui/core", "@opentui/solid", "solid-js"]) {
-    assert.equal(packageJson.peerDependenciesMeta?.[peer]?.optional, true, `${peer} stays an optional peer`)
+  assert.equal(packageJson.peerDependenciesMeta?.["@opencode/plugin"]?.optional, true)
+})
+
+test("the TUI runtime packages ship as dependencies, not host peers", () => {
+  // Ticket #279: the installed TUI must resolve @opentui/core, @opentui/solid,
+  // and solid-js from the plugin cache; only @opencode/plugin is host-supplied.
+  assert.deepEqual(Object.keys(packageJson.peerDependencies ?? {}), ["@opencode/plugin"])
+  for (const dependency of ["@opentui/core", "@opentui/solid", "solid-js"]) {
+    assert.equal(typeof packageJson.dependencies?.[dependency], "string", `${dependency} is a runtime dependency`)
+    assert.equal(packageJson.devDependencies?.[dependency], undefined, `${dependency} is not dev-only`)
   }
 })
 
