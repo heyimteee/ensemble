@@ -16,6 +16,7 @@
     "src/v2/latency-budget.ts",
     "src/v2/live-matrix.ts",
     "src/v2/prompt-benchmark.ts",
+    "src/v2/release.ts",
     "src/v2/test-service.ts"
   ]
 }

@@ -32,6 +32,7 @@ const DEV_ONLY = new Set([
   "latency-budget.ts",
   "live-matrix.ts",
   "prompt-benchmark.ts",
+  "release.ts",
   "test-service.ts",
 ])
 

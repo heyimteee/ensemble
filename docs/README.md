@@ -3,6 +3,7 @@
 ## Product
 
 - [Project overview](../README.md)
+- [Changelog](../CHANGELOG.md): release scaffolding; the tag-driven workflow uses the matching version section as the GitHub release body
 - [Domain glossary](../GLOSSARY.md)
 - [Implementation and acceptance notes](implementation.md)
 - [v2 product specification #17](https://github.com/heyimteee/ensemble/issues/17): workspace group chat, subtasks, leader routing, and native-session drill-down
@@ -46,9 +47,12 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Backup and restore](operations/backup-restore.md): the durable-state document, RPC actions, the operator CLI, the automatic rollback slot, and failure recovery
 - [Upgrade from the pre-release](operations/upgrade.md): native-first defaults, AGENTS v7, the native-state refactor, and additive durable-state migrations
 - [Package rollback](operations/rollback.md): package-only and state rollback, plus the rehearsed failure path
+- [Release operations](operations/release.md): the tag-driven workflow, the token-free dry run, main protection and its 11 real check contexts, provenance, the SBOM, and the changelog-based GitHub release
+- [Release sign-off checklist](operations/release-signoff.md): security, MIT license/legal, package contents, clean-install proof, rollback, support readiness, publish, and post-release checks
 
 ## Verification
 
+- [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence
 - [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
 - [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
 - [Clean-install release candidate](verification/2026-11-16-ticket-270.md): the loopback-registry `opencode plugin add` proof, the installed server tools and package source, and the exact TUI source-package load failure deferred to #279

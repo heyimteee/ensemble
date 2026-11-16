@@ -45,8 +45,44 @@ const LIVE_HOST_ACTION = ".github/actions/live-host/action.yml"
 const COMPATIBILITY_WORKFLOW = ".github/workflows/compatibility.yml"
 const NODE_MATRIX_WORKFLOW = ".github/workflows/node-matrix.yml"
 const DOCS_WORKFLOW = ".github/workflows/docs.yml"
+const RELEASE_WORKFLOW = ".github/workflows/release.yml"
 const LATENCY_WORKFLOW = ".github/workflows/latency.yml"
 const ARTIFACTS_PATH = "${{ runner.temp }}/ensemble-live-artifacts"
+
+/**
+ * Release job budgets in minutes. The release workflow is tag/dispatch only;
+ * it never runs on a pull request, so it is not part of the PR matrix.
+ */
+export const RELEASE_JOB_BUDGET_MINUTES: Readonly<Record<string, number>> = {
+  preflight: 5,
+  package: 30,
+  "publish-dry-run": 15,
+  publish: 15,
+  "github-release": 10,
+}
+
+/**
+ * The status contexts `main` requires before merge (ticket #275). These are
+ * the real GitHub Actions check names: the job `name:` with the matrix value
+ * substituted, not the workflow file or job id. `docs/operations/release.md`
+ * records the same list, and the contract test proves every name comes from a
+ * checked-in workflow. Change a job name or matrix entry and this list must
+ * change with it; a required context that no workflow produces blocks every
+ * pull request forever.
+ */
+export const REQUIRED_STATUS_CHECKS: readonly string[] = [
+  "verify",
+  "live-fake",
+  "live-native",
+  "live-multilocation",
+  "latency-smoke",
+  "docs:check",
+  "verify (Node 22.23.4)",
+  "verify (Node 24.22.1)",
+  "verify (Node 26.12.1)",
+  "OpenCode 2.2.6",
+  "OpenCode 2.2.7",
+]
 
 /** Split the `jobs:` block into job id -> job body. Top-level keys end it. */
 export function workflowJobs(text: string): Map<string, string> {
@@ -284,6 +320,168 @@ export function checkNightlyWorkflow(text: string, supportedHosts: readonly stri
   return failures
 }
 
+/** Read a top-level YAML block such as `on:` or `permissions:`. */
+function topLevelBlock(text: string, key: string): string {
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex((line) => new RegExp(`^${key}:\\s*$`).test(line))
+  if (start < 0) return ""
+  const body: string[] = []
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index]!
+    if (/^#/.test(line)) continue
+    if (/^\S/.test(line)) break
+    body.push(line)
+  }
+  return body.join("\n")
+}
+
+/**
+ * Ticket #275: the release workflow is the only place that can publish. This
+ * checks the trigger, the token boundary, provenance, the SBOM, and the GitHub
+ * release shape. It is a structural check over the workflow subset the
+ * repository uses, not a general YAML parser.
+ */
+export function checkReleaseWorkflow(text: string): string[] {
+  const failures: string[] = []
+  const file = "release.yml"
+
+  const trigger = topLevelBlock(text, "on")
+  if (!trigger) failures.push(`${file}: the trigger block is missing`)
+  if (/^\s+pull_request:/m.test(trigger)) {
+    failures.push(`${file}: the release workflow must not run on pull_request events`)
+  }
+  if (/^\s+branches:/m.test(trigger)) {
+    failures.push(`${file}: a release push must be a version tag, not a branch`)
+  }
+  if (!/^\s+push:\s*$/m.test(trigger)) {
+    failures.push(`${file}: the tag push trigger is missing`)
+  }
+  if (!/^\s+tags:\s*$/m.test(trigger) || !/^\s+- "v\*"\s*$/m.test(trigger)) {
+    failures.push(`${file}: the release trigger must select v* tags`)
+  }
+  if (!/^\s+workflow_dispatch:\s*$/m.test(trigger)) {
+    failures.push(`${file}: workflow_dispatch is missing`)
+  }
+
+  if (topLevelBlock(text, "permissions").trim() !== "contents: read") {
+    failures.push(`${file}: the default permission must be contents: read`)
+  }
+  checkConcurrency(file, text, failures)
+
+  const jobs = workflowJobs(text)
+  for (const [job, budget] of Object.entries(RELEASE_JOB_BUDGET_MINUTES)) {
+    const block = jobs.get(job)
+    if (!block) {
+      failures.push(`${file}: job ${job} is missing`)
+      continue
+    }
+    checkTimeout(file, job, block, budget, failures)
+  }
+  for (const job of jobs.keys()) {
+    if (!(job in RELEASE_JOB_BUDGET_MINUTES)) failures.push(`${file}: unexpected job ${job}`)
+  }
+
+  const preflight = jobs.get("preflight")
+  if (preflight) {
+    if (!preflight.includes("scripts/release-guard.mjs")) {
+      failures.push(`${file}: preflight must validate the ref with scripts/release-guard.mjs`)
+    }
+    for (const output of ["version", "tag", "dry-run", "dist-tag"]) {
+      if (!preflight.includes(`steps.mode.outputs.${output}`)) {
+        failures.push(`${file}: preflight must export the ${output} output`)
+      }
+    }
+  }
+
+  const pkg = jobs.get("package")
+  if (pkg) {
+    for (const command of [
+      "npm ci",
+      "npm run verify",
+      "npm run docs:check",
+      "npm run build",
+      "npm pack",
+      "npm sbom --sbom-format=cyclonedx",
+    ]) {
+      if (!pkg.includes(command)) failures.push(`${file}: package must run ${command}`)
+    }
+    if (!/uses:\s*actions\/upload-artifact@v4/.test(pkg)) {
+      failures.push(`${file}: package must upload the tarball and the SBOM`)
+    }
+  }
+
+  const dryRun = jobs.get("publish-dry-run")
+  if (dryRun) {
+    if (!/npm publish --dry-run\b/.test(dryRun)) {
+      failures.push(`${file}: publish-dry-run must run npm publish --dry-run`)
+    }
+    if (dryRun.includes("secrets.")) {
+      failures.push(`${file}: publish-dry-run must not need a secret`)
+    }
+    if (!/needs\.preflight\.outputs\.dry-run/.test(dryRun)) {
+      failures.push(`${file}: publish-dry-run must follow the preflight dry-run mode`)
+    }
+    if (!/--tag\s+"\$DIST_TAG"/.test(dryRun) || !dryRun.includes("needs.preflight.outputs.dist-tag")) {
+      failures.push(`${file}: publish-dry-run must use the preflight dist-tag`)
+    }
+  }
+
+  const publish = jobs.get("publish")
+  if (publish) {
+    if (!/npm publish --provenance --access public/.test(publish)) {
+      failures.push(`${file}: publish must run npm publish --provenance --access public`)
+    }
+    if (/--dry-run/.test(publish)) {
+      failures.push(`${file}: the publish job must not run in dry-run mode`)
+    }
+    if (!/NODE_AUTH_TOKEN:\s*\$\{\{\s*secrets\.NPM_TOKEN\s*\}\}/.test(publish)) {
+      failures.push(`${file}: publish must authenticate with NODE_AUTH_TOKEN from the NPM_TOKEN secret`)
+    }
+    if (!/^\s+id-token:\s*write\s*$/m.test(publish)) {
+      failures.push(`${file}: publish must grant id-token: write for provenance`)
+    }
+    if (!/--tag\s+"\$DIST_TAG"/.test(publish) || !publish.includes("needs.preflight.outputs.dist-tag")) {
+      failures.push(`${file}: publish must use the preflight dist-tag so a prerelease is not tagged latest`)
+    }
+    const gate = /^ {4}if:\s*(.+)$/m.exec(publish)?.[1] ?? ""
+    if (!/github\.event_name == 'push'/.test(gate) || !/startsWith\(github\.ref, 'refs\/tags\/v'\)/.test(gate)) {
+      failures.push(`${file}: publish must only run for a version tag push`)
+    }
+  }
+
+  const release = jobs.get("github-release")
+  if (release) {
+    if (!/gh release create/.test(release)) {
+      failures.push(`${file}: github-release must create the GitHub release`)
+    }
+    if (!/--notes-file\b/.test(release)) {
+      failures.push(`${file}: the GitHub release must publish the release notes from the changelog`)
+    }
+    if (!/\.cdx\.json/.test(release)) {
+      failures.push(`${file}: the GitHub release must attach the SBOM`)
+    }
+    if (!/^\s+contents:\s*write\s*$/m.test(release)) {
+      failures.push(`${file}: github-release needs contents: write`)
+    }
+    const gate = /^ {4}if:\s*(.+)$/m.exec(release)?.[1] ?? ""
+    if (!/github\.event_name == 'push'/.test(gate) || !/startsWith\(github\.ref, 'refs\/tags\/v'\)/.test(gate)) {
+      failures.push(`${file}: github-release must only run for a version tag push`)
+    }
+  }
+
+  if (/\bset\s+-x\b/.test(text)) {
+    failures.push(`${file}: command tracing would print the npm token`)
+  }
+  if (/(?:echo|printf)[^\n]*secrets\./.test(text)) {
+    failures.push(`${file}: the workflow must not print a secret`)
+  }
+  if (/\/home\/|\/Users\//.test(text)) {
+    failures.push(`${file}: the workflow must not contain private absolute paths`)
+  }
+
+  return failures
+}
+
 export function checkLiveHostAction(text: string): string[] {
   const failures: string[] = []
   const file = "action.yml"
@@ -371,6 +569,7 @@ export function checkCiRepository(
   const compatibility = readWorkflow(root, COMPATIBILITY_WORKFLOW, failures)
   const nodeMatrix = readWorkflow(root, NODE_MATRIX_WORKFLOW, failures)
   const docs = readWorkflow(root, DOCS_WORKFLOW, failures)
+  const release = readWorkflow(root, RELEASE_WORKFLOW, failures)
 
   if (existsSync(join(root, LATENCY_WORKFLOW))) {
     failures.push(`${LATENCY_WORKFLOW}: the PR smoke and nightly reference gate live in verify.yml and nightly.yml`)
@@ -379,6 +578,7 @@ export function checkCiRepository(
   if (nightly) failures.push(...checkNightlyWorkflow(nightly, supportedHosts))
   if (action) failures.push(...checkLiveHostAction(action))
   if (compatibility) failures.push(...checkCompatibilityWorkflow(compatibility, supportedHosts))
+  if (release) failures.push(...checkReleaseWorkflow(release))
 
   // Ticket #262 owns the docs/package contract: `engines.node`, the Node
   // matrix, and `docs:check` must agree with the canonical version constants.

@@ -8,10 +8,12 @@ import {
   NIGHTLY_JOB_BUDGET_MINUTES,
   PR_JOB_BUDGET_MINUTES,
   PR_LIVE_SUITES,
+  REQUIRED_STATUS_CHECKS,
   checkCiRepository,
   checkCompatibilityWorkflow,
   checkLiveHostAction,
   checkNightlyWorkflow,
+  checkReleaseWorkflow,
   checkVerifyWorkflow,
   workflowJobs,
 } from "./ci-workflows.ts"
@@ -22,6 +24,7 @@ const supported = [...SUPPORTED_OPENCODE_VERSIONS]
 const latest = supported[supported.length - 1]!
 const verifyWorkflowPath = ".github/workflows/verify.yml"
 const nightlyWorkflowPath = ".github/workflows/nightly.yml"
+const releaseWorkflowPath = ".github/workflows/release.yml"
 const liveHostActionPath = ".github/actions/live-host/action.yml"
 
 function read(path: string): string {
@@ -184,4 +187,115 @@ test("a hardcoded host version in the live host action is rejected", () => {
 test("the repository keeps the compatibility, Node, and docs workflows and drops the duplicate latency workflow", () => {
   assert.deepEqual(checkCiRepository(repoRoot, supported), [])
   assert.equal(existsSync(join(repoRoot, ".github/workflows/latency.yml")), false)
+})
+
+test("the release workflow is tag-driven and dry-runs a manual dispatch", () => {
+  const text = read(releaseWorkflowPath)
+  assert.deepEqual(checkReleaseWorkflow(text), [])
+  assert.deepEqual(
+    [...workflowJobs(text).keys()].sort(),
+    ["github-release", "package", "preflight", "publish", "publish-dry-run"],
+  )
+
+  const noDispatch = text.replace("  workflow_dispatch:\n", "")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noDispatch), /workflow_dispatch/).length > 0)
+})
+
+test("a release workflow that can run on a branch push or pull request is rejected", () => {
+  const text = read(releaseWorkflowPath)
+
+  const withPullRequest = text.replace("on:\n", "on:\n  pull_request:\n")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withPullRequest), /pull_request/).length > 0)
+
+  const withBranch = text.replace('      - "v*"', '      - "v*"\n    branches:\n      - main')
+  assert.ok(failuresMatching(checkReleaseWorkflow(withBranch), /tag|branch/).length > 0)
+
+  const barePush = text.replace('  push:\n    tags:\n      - "v*"\n', "  push:\n")
+  assert.ok(failuresMatching(checkReleaseWorkflow(barePush), /tag/).length > 0)
+})
+
+test("a real publish needs the tag ref, provenance, the npm token secret, and OIDC", () => {
+  const text = read(releaseWorkflowPath)
+
+  const withoutProvenance = text.replace(
+    "npm publish --provenance --access public",
+    "npm publish --access public",
+  )
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutProvenance), /provenance/).length > 0)
+
+  const withoutToken = removeLine(text, "NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutToken), /NPM_TOKEN/).length > 0)
+
+  const withoutOidc = removeLine(text, "id-token: write")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutOidc), /id-token/).length > 0)
+
+  const branchPublish = text.replace(
+    "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+    "    if: github.ref == 'refs/heads/main'",
+  )
+  assert.ok(failuresMatching(checkReleaseWorkflow(branchPublish), /tag/).length > 0)
+})
+
+test("the dry run publishes without a token and never performs a real publish", () => {
+  const text = read(releaseWorkflowPath)
+
+  const realPublish = text.replace(
+    "npm publish --dry-run --access public",
+    "npm publish --access public",
+  )
+  assert.ok(failuresMatching(checkReleaseWorkflow(realPublish), /dry-run/).length > 0)
+
+  const dryRunJob = workflowJobs(text).get("publish-dry-run")!
+  assert.doesNotMatch(dryRunJob, /secrets\./, "the dry run must not need a secret")
+
+  const withoutDistTag = text.replace(' --tag "$DIST_TAG"', "")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutDistTag), /dist-tag/).length > 0)
+})
+
+test("the release produces an SBOM and publishes the notes on the GitHub release", () => {
+  const text = read(releaseWorkflowPath)
+
+  const noSbom = removeLine(text, "npm sbom --sbom-format=cyclonedx")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noSbom), /SBOM|sbom/).length > 0)
+
+  const noNotes = removeLine(text, "--notes-file")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noNotes), /notes/).length > 0)
+
+  const noRelease = removeLine(text, "gh release create")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noRelease), /GitHub release/).length > 0)
+})
+
+test("the required main checks are exactly the workflow job names", () => {
+  const expected = new Set<string>([
+    ...["verify", "live-fake", "live-native", "live-multilocation", "latency-smoke"],
+    "docs:check",
+  ])
+  for (const node of [...read(".github/workflows/node-matrix.yml").matchAll(/^\s+- "(\d+\.\d+\.\d+)"$/gm)]) {
+    expected.add(`verify (Node ${node[1]})`)
+  }
+  for (const host of supported) expected.add(`OpenCode ${host}`)
+
+  assert.deepEqual([...REQUIRED_STATUS_CHECKS].sort(), [...expected].sort())
+
+  const verifyNames = [...workflowJobs(read(verifyWorkflowPath)).values()].map(
+    (block) => /^ {4}name:\s*(.+)$/m.exec(block)?.[1],
+  )
+  for (const name of ["verify", "live-fake", "live-native", "live-multilocation", "latency-smoke"]) {
+    assert.ok(verifyNames.includes(name), `${name} is a real verify.yml job name`)
+  }
+  assert.match(read(".github/workflows/docs.yml"), /^ {4}name: docs:check$/m)
+  assert.match(read(".github/workflows/node-matrix.yml"), /^ {4}name: verify \(Node \$\{\{ matrix\.node \}\}\)$/m)
+  assert.match(
+    read(".github/workflows/compatibility.yml"),
+    /^ {4}name: OpenCode \$\{\{ matrix\.opencode \}\}$/m,
+  )
+})
+
+test("the operations docs record every required check and the applied protection", () => {
+  const doc = read("docs/operations/release.md")
+  for (const context of REQUIRED_STATUS_CHECKS) {
+    assert.ok(doc.includes(context), `docs/operations/release.md must list ${context}`)
+  }
+  assert.match(doc, /require.*review|required_approving_review_count/i)
+  assert.match(doc, /ruleset|branch protection/i)
 })
