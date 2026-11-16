@@ -194,7 +194,7 @@ Every requested directory is queried on the **one selected service**, sequential
 
 ## Known limitations
 
-- **Distribution is pending.** The package is `@heyimteee/ensemble` at version `0.1.0` under the MIT license; it is not published to a registry yet.
+- **Distribution is pending.** The package is `@heyimteee/ensemble` under the MIT license. The local release candidate is `0.1.0-rc.1`; it is not published to a registry yet, and the installed TUI part is blocked on the built-package follow-up ([#279](https://github.com/heyimteee/ensemble/issues/279)).
 - **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 on Linux/tmux are tested. Other host releases load with a runtime warning but are untested, and macOS/Herdr and Windows remain unverified. See the [support matrix](docs/support/support-matrix.md) for the evidence and platform boundary.
 - **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. Every PR runs the deterministic fake, size, lifecycle, subagent, native-first, Vera, tool-surface, multi-location, and latency-smoke jobs; the real-model `npm run test:live` acceptance is opt-in in the nightly workflow (`ENSEMBLE_NIGHTLY_REAL=1`) and is never part of the PR gate.
 - **Terminal accessibility depends on the host.** Screen-reader output, high-contrast modes, font scaling, and mouse drag-copy are host features. Ensemble supplies glyph-and-word status, reduced-motion, `NO_COLOR`, and ASCII fallbacks; see the [terminal accessibility checklist](docs/verification/terminal-accessibility-checklist.md).
