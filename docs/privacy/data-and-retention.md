@@ -43,8 +43,9 @@ Notes:
 ## Export
 
 Export is served by the existing `ensemble.v2` RPC through the `data.export`
-action. The user-facing entry point is a doctor-style CLI over the same service
-descriptor:
+action. The operator entry point is a doctor-style CLI over the same service
+descriptor. Like `npm run doctor`, it runs from an Ensemble source checkout;
+installed-package integrations call the RPC actions directly.
 
 ```sh
 # Write the export to a file (recommended: exports contain conversation text)
@@ -61,6 +62,11 @@ descriptor is `$XDG_STATE_HOME/opencode/service.json` (or
 `--server` overrides the URL, and `OPENCODE_PASSWORD` overrides the descriptor
 password. Credentials are never printed. A newly created export file is written
 with mode `0600`.
+
+Installed integrations can call the same action through the service RPC:
+`POST /api/rpc/ensemble.v2/invoke?location%5Bdirectory%5D=<directory>` with
+`{"input":{"directory":"<directory>","action":"data.export","payload":{}}}`.
+Use the service's configured credentials; never paste them into shell history.
 
 ### Export format
 

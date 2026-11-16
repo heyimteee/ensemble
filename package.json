@@ -37,6 +37,7 @@
     "!src/v2/**/*.test.tsx",
     "!src/v2/fixtures/**",
     "!src/v2/ci-workflows.ts",
+    "!src/v2/data-cli.ts",
     "!src/v2/doctor-cli.ts",
     "!src/v2/doctor.ts",
     "!src/v2/flake-policy.ts",
