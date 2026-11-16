@@ -1,6 +1,6 @@
 {
   "name": "@heyimteee/ensemble",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "description": "Persistent agent teams inside OpenCode",
   "license": "MIT",
   "author": "heyimteee",
@@ -72,7 +72,8 @@
     "test:live:multilocation": "bash scripts/live-multilocation.sh",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
     "logs:summary": "node scripts/log-summary.mjs",
-    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs"
+    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs",
+    "test:install:rc": "bash scripts/live-install-check.sh"
   },
   "engines": {
     "node": ">=22.23.4"

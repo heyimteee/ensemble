@@ -34,6 +34,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 ## Verification
 
 - [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
+- [Clean-install release candidate](verification/2026-11-16-ticket-270.md): the loopback-registry `opencode plugin add` proof, the installed server tools and package source, and the exact TUI source-package load failure deferred to #279
 - [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
 - [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
 - [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix
