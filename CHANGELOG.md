@@ -78,6 +78,18 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 ### Verified
 
 - `npm run verify` and `npm run docs:check` on the release candidate.
+- Final-tip clean install at `b194b95` in an isolated OpenCode 2.2.7 / Node
+  26.12.1 host: `test:install:rc` PASS; 124 runtime files, 507,824 bytes;
+  `plugin list` reported `ensemble.v2 0.1.0-rc.2` from the package; six native
+  server tools and the installed TUI route/`/ensemble` loaded.
+- Final-tip deterministic fake E2E at `b194b95` on OpenCode 2.2.7:
+  `test:live:fake:all` PASS; `fake` 407 s, `fake-empty` 9 s; 2 passed, 0 failed,
+  0 skipped, 0 retries; flake budget ok.
+- A 4-hour enforced soak at `b194b95` passed with 240 samples over 14,439 s and
+  5,240 messages: 0 failures, queue/native settled, RSS growth 94.89 MiB/h
+  (gate 256) and 19.14 MiB/1k messages (gate 64), no findings. The first run
+  resolved OpenCode 2.3.0, which is outside the supported range; the
+  supported-version 2.2.7 rerun is still in progress and is not claimed.
 - The deterministic fake and native E2E matrices on OpenCode 2.2.6 and 2.2.7.
 - The Node 22.23.4, 24.22.1, and 26.12.1 unit/typecheck matrix.
 - The installed `0.1.0-rc.2` package on Linux (loopback registry) and macOS
@@ -99,8 +111,9 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
   package or the loopback registry.
 - **No telemetry.** Ensemble does not upload logs or usage data; diagnostics
   are local and must be redacted before sharing.
-- **The 4-hour soak is a nightly/opt-in gate.** Only the smoke run is recorded;
-  the multi-hour gate has not been claimed as passed.
+- **The 4-hour soak passed on an unsupported host.** The enforced gate passed
+  on OpenCode 2.3.0; the supported-version 2.2.7 rerun is still in progress and
+  is not claimed. Do not treat the 2.3.0 result as a 2.2.7 support claim.
 - **The macOS size-matrix load probe is Linux-only.** The size matrix passes
   with the load probe skipped; Braille glyphs depend on terminal font fallback
   on the tested Mac.

@@ -146,8 +146,9 @@ logs. Maintainer response targets are best effort, not an SLA.
   a loopback registry; do not recommend Git installs for this host.
 - **No telemetry.** Ensemble does not upload logs or usage data. Diagnostics
   are local, and the support bundle is opt-in and redacted.
-- **The 4-hour soak is a nightly/opt-in gate.** The recorded evidence is a
-  smoke run; the multi-hour gate has not been claimed as passed.
+- **The 4-hour soak passed on an unsupported host.** The enforced gate passed
+  on OpenCode 2.3.0; the supported-version 2.2.7 rerun is still in progress and
+  is not claimed. Do not treat the 2.3.0 result as a 2.2.7 support claim.
 - **macOS size-matrix load probe is Linux-only.** Exact sizes pass with the
   load probe skipped. Braille glyphs depend on terminal font fallback on the
   tested Mac.
@@ -156,15 +157,20 @@ logs. Maintainer response targets are best effort, not an SLA.
 
 ## Proven and pending
 
+The final-tip checks at `b194b95` supersede the earlier install evidence for
+the artifact. The clean install is still a loopback-registry check, not a
+public npm install.
+
 | Item | Status | Evidence |
 |---|---|---|
 | Build, pack, and runtime-only contents | **PASS** | [#269](../verification/2026-11-16-ticket-269.md), [#279](../verification/2026-11-16-ticket-279.md) |
-| Clean install through `opencode plugin add` (Linux, OpenCode 2.2.7) | **PASS** | [#279](../verification/2026-11-16-ticket-279.md) |
+| Final-tip clean install at `b194b95` (Linux, OpenCode 2.2.7) | **PASS** | 124 runtime files, 507,824 bytes; six native tools, TUI route, `/ensemble`; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95) |
+| Final-tip deterministic fake E2E at `b194b95` (OpenCode 2.2.7) | **PASS** | `fake` 407 s, `fake-empty` 9 s; 2 passed, 0 retries; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95) |
 | Six native tools, installed TUI route, `/ensemble` | **PASS** | [#279](../verification/2026-11-16-ticket-279.md), [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS/Herdr install, TUI, fake E2E, checklist except 1.7 | **PASS except 1.7** | [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS mouse drag (1.7) | **PENDING** | Not run; no selection/copy claim |
+| 4-hour enforced soak at `b194b95` | **PASS on OpenCode 2.3.0; 2.2.7 rerun PENDING** | 240 samples, 14,439 s, 5,240 messages, 0 failures, 94.89 MiB/h and 19.14 MiB/1k messages; [soak record](../verification/2026-11-17-soak.md) |
 | Public npm publish, tag, GitHub release, announcement | **PENDING** | Human-gated; see [launch plan](launch-plan-0.1.0-rc.2.md) |
-| 4-hour soak | **PENDING** | Nightly/opt-in gate; smoke only in [#276](../verification/2026-11-16-ticket-276.md) |
 
 The full release decision, sign-offs, and remaining gates are in
 [Release sign-off](release-signoff.md#candidate-sign-off--010-rc2-2026-11-17)

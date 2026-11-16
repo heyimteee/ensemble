@@ -66,8 +66,8 @@ files, or unredacted logs.
 
 1. **Approve the candidate.** The release manager reviews
    [the sign-off](release-signoff.md), records the date and name, and
-   explicitly accepts or clears each pending item: macOS 1.7, the 4-hour soak
-   status, and the package-downgrade gap.
+   explicitly accepts or clears each pending item: macOS 1.7, the supported
+   OpenCode 2.2.7 soak rerun, and the package-downgrade gap.
 2. **Freeze the release commit.** Merge the approved release commit; every
    required check in [the release guide](release.md) must be green. No runtime
    change after the last clean-install evidence without a re-run.
@@ -140,5 +140,6 @@ There is no telemetry, so success is judged from public signals:
 - A final `0.1.0` launch. That is a separate decision after this candidate has
   run.
 - Windows support, paid support, hosted service, or a marketing campaign.
-- Claiming the 4-hour soak, the macOS mouse-drag check, or Herdr prefix
-  ownership. All remain pending or inconclusive until recorded.
+- Claiming a supported-version 4-hour soak. The 4-hour gate passed on OpenCode
+  2.3.0; the 2.2.7 rerun is pending and not claimed. The macOS mouse-drag check
+  and Herdr prefix ownership remain pending or inconclusive until recorded.
