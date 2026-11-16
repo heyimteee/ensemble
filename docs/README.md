@@ -33,6 +33,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Threat model](security/threat-model.md): storage, filesystem/shell, tools, cross-workspace access, skills, approvals, model fallback, and logs, with code evidence
 - [Permission-model review](security/permission-model-review.md): approvals, outside-roster contact, external directories, self-approval, and native permission preservation
 - [Accepted risks](security/accepted-risks.md): dependency advisories and residual risks with review dates
+- [Data classes, retention, export, and delete](privacy/data-and-retention.md): what Ensemble stores, the 24-hour Work and 7-day log retention, the `ensemble.data-export` format, the scoped delete path, and the v7 `AGENTS.md` roster disclosure guidance and manual opt-out
 
 ## Support
 
@@ -50,6 +51,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix
 - [Full deterministic E2E in CI](verification/2026-11-16-ticket-261.md): cost-split PR jobs, nightly latency and opt-in real-model jobs, failure artifacts, the OpenCode 2.2.7 pin, the job-graph checker, and the passing deterministic matrix
 - [Documentation freshness](verification/2026-11-12-ticket-262.md): canonical contract/host/Node constants, the docs index, ADR 0011 at contract v7, and the `docs:check` CI gate
+- [Data retention, export, delete, and roster disclosure](verification/2026-11-16-ticket-272.md): the `data.export`/`data.delete` RPC actions and CLI, the documented retention and export format, post-delete workspace health, log deletion, and the v7 `AGENTS.md` title/role disclosure guidance
 - [Live harness flake policy](verification/flake-policy.md): timing-only retry, flake budget, failure artifacts, and the issue/owner quarantine rule
 - [Live harness flake policy verification](verification/2026-11-12-ticket-256.md): readiness-based wizard alignment, classified timing retry, artifact preservation, and the passing deterministic matrix
 - [Latency budget and SLO](verification/latency-budget.md): split rail/patch-card/first-token metrics, reference and smoke profiles, the deterministic patch-card fixture, and the deliberate regression gate
