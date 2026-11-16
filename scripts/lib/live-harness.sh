@@ -309,6 +309,21 @@ live_capture_matches() {
   live_capture "$session" | grep -qE -- "$expression"
 }
 
+# Reduced-motion still frame for Ensemble's own surfaces. The compatibility
+# hosts draw their own footer spinner (OpenCode 2.2.6 shows "Finishing
+# startup…"), so a pane-wide "no motion glyph" scan would assert host chrome
+# instead of Ensemble behavior. The Work card header and the rail busy mark are
+# the product surfaces: both stay on frame 0, and no later frame may replace
+# either one.
+live_capture_reduced_motion_frame0() {
+  local session="$1" agent="$2" status="$3" workspace="$4" pane
+  pane=$(live_capture "$session")
+  grep -Eq "${agent} +([^ ]+ +)*⠋ ${status}" <<<"$pane" || return 1
+  grep -Eq "${workspace} +⠋[0-9]" <<<"$pane" || return 1
+  ! grep -Eq "${agent} +([^ ]+ +)*(⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) ${status}" <<<"$pane"
+  ! grep -Eq "${workspace} +[⠙⠹⠸⠼⠴⠦⠧⠇⠏][0-9]" <<<"$pane"
+}
+
 live_wait_for_text() {
   local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
   live_wait_for "$seconds" "$description" live_capture_contains "$session" "$text"
@@ -1462,6 +1477,30 @@ live_type() {
 
 live_key() {
   "$LIVE_TMUX_BIN" send-keys -t "$1" "$2"
+}
+
+# Settle the composer in Insert mode before a submit. A queued Escape or a late
+# completion refresh can leave the palette open; Enter then selects a completion
+# row instead of submitting, preserving the draft with no validation feedback.
+# Prove the TUI consumes a full Normal/Insert round-trip first. A host too
+# starved to render that round-trip is a timing failure, so the scenario retries
+# as a class; the product assertion after the submit is never retried.
+live_settle_composer_insert() {
+  local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-composer}"
+  local deadline attempts=0
+  deadline=$(( $(date +%s%N) + seconds * 1000000000 ))
+  while (( attempts < 4 )); do
+    attempts=$(( attempts + 1 ))
+    live_key "$session" Escape
+    if live_poll_for 3 live_capture_contains "$session" "NORMAL  │ COMPOSER"; then
+      live_key "$session" "i"
+      live_wait_for "$seconds" "$description Insert ready" live_capture_contains "$session" "INSERT  │ COMPOSER" \
+        || live_fail_timing "composer did not return to Insert: $description"
+      return 0
+    fi
+    (( $(date +%s%N) >= deadline )) && break
+  done
+  live_fail_timing "composer did not become ready: $description"
 }
 
 live_key_repeat() {

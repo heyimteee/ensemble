@@ -180,6 +180,78 @@ test("a failed attempt writes a classified record and redacted pane/log artifact
   }
 })
 
+function reducedMotionFrame(box: Sandbox, pane: string): number | null {
+  const result = spawnSync(
+    bash,
+    [
+      "-c",
+      'source "$1"; PANE="$2"; live_capture() { cat "$PANE"; }; live_capture_reduced_motion_frame0 probe FAKEAGENT WORKING "#LiveSite"',
+      "--",
+      harness,
+      pane,
+    ],
+    { encoding: "utf8", env: environment(box) },
+  )
+  return result.status
+}
+
+test("the reduced-motion frame asserts the Ensemble card, not host chrome", () => {
+  const box = sandbox()
+  try {
+    const still = join(box.root, "still.txt")
+    writeFileSync(
+      still,
+      [
+        "│  FAKEAGENT   hops 0/8 · cmd 24 left ⠋ WORKING │",
+        "│  #LiveSite ⠋1 ●1 │",
+        " Message sent                              ⠏ Finishing startup…",
+        "",
+      ].join("\n"),
+    )
+    assert.equal(
+      reducedMotionFrame(box, still),
+      0,
+      "a host footer spinner does not turn the Ensemble still frame into a failure",
+    )
+
+    const animated = join(box.root, "animated.txt")
+    writeFileSync(
+      animated,
+      [
+        "│  FAKEAGENT   hops 0/8 · cmd 24 left ⠏ WORKING │",
+        "│  #LiveSite ⠋1 ●1 │",
+        "",
+      ].join("\n"),
+    )
+    assert.notEqual(
+      reducedMotionFrame(box, animated),
+      0,
+      "a non-zero Work-card frame still fails under reduced motion",
+    )
+
+    const animatedRail = join(box.root, "animated-rail.txt")
+    writeFileSync(
+      animatedRail,
+      [
+        "│  FAKEAGENT   hops 0/8 · cmd 24 left ⠋ WORKING │",
+        "│  #LiveSite ⠏1 ●1 │",
+        "",
+      ].join("\n"),
+    )
+    assert.notEqual(
+      reducedMotionFrame(box, animatedRail),
+      0,
+      "a non-zero rail busy frame still fails under reduced motion",
+    )
+
+    const missing = join(box.root, "missing.txt")
+    writeFileSync(missing, "│  Nothing active yet │\n")
+    assert.notEqual(reducedMotionFrame(box, missing), 0, "the assertion needs a visible Work card")
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
 function captureChatHeader(box: Sandbox, pane: string): number | null {
   const result = spawnSync(
     bash,
