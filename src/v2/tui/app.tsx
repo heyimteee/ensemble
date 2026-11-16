@@ -43,7 +43,7 @@ import {
   type RailEmphasis,
   type RailPulseStart,
 } from "./rail.ts"
-import { palette } from "./theme.ts"
+import { isNoColor, palette } from "./theme.ts"
 import {
   buildRailModel,
   clampRailCursor,
@@ -442,6 +442,15 @@ export function EnsembleV2App() {
   // Ticket #137: the host theme mode selects the readable pale-blue identity pair.
   // Ticket #282: NO_COLOR resolves every role to terminal defaults at this seam.
   const colors = palette(context.theme as any, context.themeMode, process.env)
+  // Ticket #284: OpenTUI's scrollbox paints its thumb/track with a concrete
+  // default palette, and text fields fall back to a host placeholder color.
+  // Under `NO_COLOR` both resolve to the monochrome roles; without it the
+  // renderer/host defaults are untouched.
+  const colorSuppressed = isNoColor(process.env)
+  const transcriptScrollbarOptions = colorSuppressed
+    ? { trackOptions: { foregroundColor: colors.faint, backgroundColor: colors.panel } }
+    : undefined
+  const monochromePlaceholder = colorSuppressed ? { placeholderColor: colors.faint } : {}
   // Ticket #119: the host toast is only a fallback for feedback that cannot be
   // painted by the mounted Ensemble surface (setup failure, or an async
   // completion while the native route is visible). Everything else renders in
@@ -451,7 +460,7 @@ export function EnsembleV2App() {
   }
   const syntaxStyle = (() => {
     try {
-      return SyntaxStyle.fromStyles(markdownStyles(context.theme), (context.renderer as any).nativeScene)
+      return SyntaxStyle.fromStyles(markdownStyles(context.theme, process.env), (context.renderer as any).nativeScene)
     } catch (error) {
       console.error("ensemble: markdown styling unavailable", error)
       showHostToast({ title: "Ensemble", message: "Rich Markdown styling unavailable; using plain text.", tone: "warning" })
@@ -1878,7 +1887,7 @@ export function EnsembleV2App() {
   // relays all resolve through unifiedAuthorColor (ID first, roster-name
   // fallback), so each agent reads as the same color everywhere.
   const authorColor = (input: { agentID?: string; author: string; role: "user" | "agent" | "system" }) =>
-    unifiedAuthorColor(input, state()?.agents ?? {}, rosterAgents(), colors, colors.categorical)
+    unifiedAuthorColor(input, state()?.agents ?? {}, rosterAgents(), colors, colors.categorical, process.env)
   const hasChatContent = createMemo(
     () =>
       finalizedLines().length > 0 ||
@@ -7453,7 +7462,7 @@ export function EnsembleV2App() {
                         </box>
                       }>
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
-                          <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
+                          <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} scrollbarOptions={transcriptScrollbarOptions} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
                               <box flexDirection="column" width="100%" paddingRight={1}>
                                 <For each={mergedRows()}>{(row) => {
                                   // Ticket #67 muted inline completions: one
@@ -7604,7 +7613,7 @@ export function EnsembleV2App() {
                         </box>
                       </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={composerBorderColor()} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onPaste={handleComposerPaste} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea {...monochromePlaceholder} ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onPaste={handleComposerPaste} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>
@@ -7870,7 +7879,7 @@ export function EnsembleV2App() {
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
             <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
             <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-              <textarea ref={(value: any) => { textPromptRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+              <textarea {...monochromePlaceholder} ref={(value: any) => { textPromptRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
             <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{interaction().mode === "visual" ? visualHint : statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))}</text>
             </box>
@@ -7937,7 +7946,7 @@ export function EnsembleV2App() {
               }>
                 <Show when={wizardStepKey()} keyed>
                   <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                    <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                    <textarea {...monochromePlaceholder} ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                   </box>
                 </Show>
               </Show>
@@ -7962,7 +7971,7 @@ export function EnsembleV2App() {
               </box>
               <Show when={wizard()!.memoryEditor}>
                 <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                  <input ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
+                  <input {...monochromePlaceholder} ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
                 </box>
               </Show>
             </Show>
