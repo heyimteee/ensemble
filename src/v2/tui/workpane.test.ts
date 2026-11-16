@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
-import { WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
+import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
 import {
   emptyHistoryViewState,
   historyGroupFocusID,
@@ -13,6 +13,8 @@ import {
   workPaneBodyHeight,
   workPaneCardsFit,
   workPaneHeader,
+  workPaneHeaderCompact,
+  workPaneHeaderForWidth,
   WORK_PANE_MAX_WIDTH,
   workTaskPage,
   workViewGroups,
@@ -88,10 +90,11 @@ test("ticket172: three-pane widths tile the view exactly and keep a usable chat"
   }
 })
 
-test("ticket243: a wide terminal caps the Work pane and gives the width to chat", () => {
+test("ticket263: a wide terminal caps the Work pane at the card-mode floor and gives the width to chat", () => {
   for (const terminalWidth of [196, 200, 240]) {
     const panes = workspacePaneWidths(terminalWidth)
     assert.equal(panes.workWidth, WORK_PANE_MAX_WIDTH, `${terminalWidth}: Work is capped`)
+    assert.equal(panes.workContentWidth, 49, `${terminalWidth}: the cap leaves 49 content columns`)
     assert.equal(
       panes.railWidth + panes.chatWidth + panes.workWidth + panes.gap * 2,
       panes.viewWidth,
@@ -101,8 +104,21 @@ test("ticket243: a wide terminal caps the Work pane and gives the width to chat"
   }
   const wide = workspacePaneWidths(196)
   const uncapped = Math.floor(wide.viewWidth * 0.4)
+  assert.equal(wide.workWidth, 53, "196 columns caps Work at 53")
+  assert.equal(wide.workWidth + wide.gap, wide.viewWidth - wide.railWidth - wide.gap - wide.chatWidth, "the Work right edge is exact")
   assert.ok(wide.workWidth < uncapped, "the cap actually narrows a 196-column Work pane")
   assert.ok(wide.chatWidth > workspacePaneWidths(160).chatWidth, "the reclaimed width goes to the chat")
+  const uncappedChat = wide.viewWidth - wide.railWidth - uncapped - wide.gap * 2
+  assert.equal(wide.chatWidth - uncappedChat, uncapped - wide.workWidth, "chat gains every column the Work cap reclaims")
+})
+
+test("ticket263: 53 columns is the narrowest Work pane that keeps card mode", () => {
+  assert.equal(WORK_PANE_MAX_WIDTH, 53)
+  assert.equal(WORK_CARD_MIN_WIDTH * 2 + WORK_CARD_GAP_COLS, 49, "card mode needs two minimum cards and one gap")
+  assert.equal(workPaneCardsFit(49), true, "49 content columns is card mode")
+  assert.equal(workPaneCardsFit(48), false, "48 content columns falls back to compact rows")
+  const panes = workspacePaneWidths(196)
+  assert.equal(panes.workWidth - panes.workChrome, 49, "the 53-column cap owns the card-mode floor")
 })
 
 test("ticket172: the drawer overlays the chat and leaves its right edge exact", () => {
@@ -133,7 +149,7 @@ test("ticket239: one full-width card keeps an exact right edge at every card wid
     working({ id: "b1", dispatchGroupID: "dispatch_2", createdAt: 2 }),
   ]
   const views = workViewGroups(items, record(...items), { now: 5_000 })
-  for (const terminalWidth of [140, 160, 200]) {
+  for (const terminalWidth of [140, 160, 196, 200, 240]) {
     const panes = workspacePaneWidths(terminalWidth)
     const layout = paginateWorkGroups(views.active, panes.workContentWidth, workPaneBodyHeight(50), 5_000)
     assert.equal(layout.mode, "cards")
@@ -603,6 +619,30 @@ test("ticket172: the Work header names the view, counts, and page", () => {
   assert.equal(workPaneHeader("active", 2, 3, 1, 1, 2), "WORK ACTIVE │ 2 groups · 3 active · 1 done │ page 1/2")
   assert.equal(workPaneHeader("history", 1, 0, 5, 2, 2), "WORK HISTORY │ 1 group · 0 active · 5 done │ page 2/2")
   assert.equal(workPaneHeader("active", 0, 0, 0, 1, 1), "WORK ACTIVE │ none yet │ page 1/1")
+})
+
+test("ticket263: the narrow card header drops done but keeps the view, counts, and page", () => {
+  const full = "WORK ACTIVE │ 5 groups · 6 active · 0 done │ page 1/2"
+  const compact = "WORK ACTIVE │ 5 groups · 6 active │ page 1/2"
+  assert.equal(full.length, 53)
+  assert.equal(compact.length, 44)
+  assert.equal(workPaneHeaderCompact("active", 5, 6, 1, 2), compact)
+  assert.equal(workPaneHeaderForWidth(49, "active", 5, 6, 0, 1, 2), compact, "49 content columns use the compact form")
+  assert.equal(workPaneHeaderForWidth(53, "active", 5, 6, 0, 1, 2), full, "a width that fits keeps the full header")
+  assert.equal(workPaneHeaderForWidth(44, "active", 5, 6, 0, 1, 2), compact, "44 columns is the compact form's own floor")
+  assert.equal(workPaneHeaderForWidth(43, "active", 5, 6, 0, 1, 2), full, "when neither form fits, keep the full form")
+  assert.equal(workPaneHeaderForWidth(40, "active", 5, 6, 0, 1, 2), full, "120x40 keeps its existing truncated header")
+  assert.equal(workPaneHeaderForWidth(42, "active", 5, 6, 0, 1, 2), full, "80x24 keeps its existing truncated header")
+  assert.equal(
+    workPaneHeaderForWidth(49, "history", 1, 0, 5, 2, 2),
+    "WORK HISTORY │ 1 group · 0 active │ page 2/2",
+    "HISTORY uses the same compact grammar",
+  )
+  assert.equal(
+    workPaneHeaderForWidth(49, "active", 0, 0, 0, 1, 1),
+    "WORK ACTIVE │ none yet │ page 1/1",
+    "empty work has no done segment to drop",
+  )
 })
 
 /** Ticket #172: the supported size matrix exercises every breakpoint. */

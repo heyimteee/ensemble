@@ -1,0 +1,35 @@
+name: Node Matrix
+
+# Ticket #258: the unit/typecheck gate runs on every tested Node line so the
+# `engines.node` floor stays evidence-based. Live suites stay on the current
+# tested Node in verify.yml; they need the OpenCode/tmux host and are slower.
+#
+# Keep these versions in sync with package.json `engines.node`, README
+# "Requirements", and docs/agents/opencode-tui-runtime.md.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - "22.23.4"
+          - "24.22.1"
+          - "26.12.1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run verify

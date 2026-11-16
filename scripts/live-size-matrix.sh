@@ -10,9 +10,9 @@ fi
 # `test:live:fake` scenario is calibrated for its 160x80 default and contains
 # viewport-sensitive transcript assertions; this script restarts the TUI at the
 # four approved sizes and proves the shell breakpoints, the right Work pane and
-# the 80x24 drawer, one full-width card per row at 160x50, compact rows at the
-# narrower sizes, spatial `hjkl`, page edges, ACTIVE pagination, the exact right
-# edge, and the white/grey Work-card focus border.
+# the 80x24 drawer, one full-width card per row and the compact Work header at
+# 160x50, compact rows at the narrower sizes, spatial `hjkl`, page edges, ACTIVE
+# pagination, the exact right edge, and the white/grey Work-card focus border.
 #
 #   npm run test:live:sizes
 #   ENSEMBLE_V6_SIZES="80x24 160x50" npm run test:live:sizes
@@ -385,21 +385,21 @@ run_load_probe_160x50() {
 
   live_invoke task.delegate "{\"workspaceID\":\"$WS_ID\",\"assigneeID\":\"${AGENT_IDS[0]}\",\"title\":\"size-load-a\",\"instruction\":\"fake-queue-hold\",\"mode\":\"research\"}" >/dev/null
   wait_active 1
-  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "one active Work card"
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active │ page 1/1" 20 "one active Work card"
   pct=$(measure_cpu_percent "$pid")
   assert_pane_updates
   live_log "size matrix: 1 working card TUI cpu=${pct}% and tmux output updating"
 
   live_invoke task.delegate "{\"workspaceID\":\"$WS_ID\",\"assigneeID\":\"${AGENT_IDS[1]}\",\"title\":\"size-load-b\",\"instruction\":\"fake-queue-hold\",\"mode\":\"research\"}" >/dev/null
   wait_active 2
-  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active · 0 done" 20 "two active Work cards"
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active │ page 1/1" 20 "two active Work cards"
   pct=$(measure_cpu_percent "$pid")
   assert_pane_updates
   live_log "size matrix: 2 working cards TUI cpu=${pct}% and tmux output updating"
 
   live_invoke task.delegate "{\"workspaceID\":\"$WS_ID\",\"assigneeID\":\"${AGENT_IDS[2]}\",\"title\":\"size-load-c\",\"instruction\":\"fake-queue-hold\",\"mode\":\"research\"}" >/dev/null
   wait_active 3
-  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 3 groups · 3 active · 0 done" 20 "three active Work cards"
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 3 groups · 3 active │ page 1/1" 20 "three active Work cards"
   pct=$(measure_cpu_percent "$pid")
   assert_pane_updates
   live_log "size matrix: 3 working cards TUI cpu=${pct}% and tmux output updating"
@@ -486,7 +486,9 @@ check_pane_chrome() {
 
 check_size_160x50() {
   ensure_active_view
-  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 5 groups · 6 active · 0 done │ page 1/2" 20 "five-group Work header at 160x50"
+  # Ticket #263: the 53-column Work pane uses the compact header; dropping the
+  # done segment keeps the page visible at 49 content columns.
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 5 groups · 6 active │ page 1/2" 20 "five-group compact Work header at 160x50"
   live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 2 active · 0 done" 10 "two-card group label"
   live_require_text "$LIVE_TUI_SESSION" "GROUP 3 · 1 active · 0 done" 20 "third group label on the first page"
   # Two cards in group one plus one each in groups two and three fit page one;

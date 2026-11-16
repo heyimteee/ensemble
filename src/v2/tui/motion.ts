@@ -1,3 +1,5 @@
+import { isAsciiTerminal } from "./separators.ts"
+
 /**
  * Slice B motion language (brief §4, normative frame sets).
  *
@@ -47,34 +49,55 @@ export const THINKING_FRAMES = ["·  ", "˙  ", " ⋮ ", "·  "] as const
 /** Queued agents are parked, never animated. */
 export const QUEUED_FRAME = "▫"
 
+/**
+ * Ticket #259: one-cell ASCII stand-ins for terminals without Braille or
+ * Unicode box-drawing glyphs. They stay static; the state word carries the
+ * meaning, so nothing depends on a glyph a font may not have.
+ */
+export const ASCII_WORKING_FRAME = "*"
+export const ASCII_WAITING_FRAME = "-"
+export const ASCII_TOOL_FRAME = ">"
+export const ASCII_THINKING_FRAME = ".  "
+export const ASCII_QUEUED_FRAME = "-"
+export const ASCII_EMPTY_MARK = "o---o---o"
+
 function cycle<const F extends readonly string[]>(frames: F, tick: number): F[number] {
   const index = ((tick % frames.length) + frames.length) % frames.length
   return frames[index]
 }
 
-/** Working/live Braille frame for a tick. Pure, modular, constant-width. */
-export function workingFrame(tick: number): string {
-  return cycle(WORKING_FRAMES, tick)
+/**
+ * Working/live Braille frame for a tick. Pure, modular, constant-width. When
+ * the caller supplies an ASCII terminal environment, the frame is a static
+ * one-cell `*` instead.
+ */
+export function workingFrame(tick: number, env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? ASCII_WORKING_FRAME : cycle(WORKING_FRAMES, tick)
 }
 
 /** Pending-work alternation frame for a tick. Pure, modular, constant-width. */
-export function waitingFrame(tick: number): string {
-  return cycle(WAITING_FRAMES, tick)
+export function waitingFrame(tick: number, env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? ASCII_WAITING_FRAME : cycle(WAITING_FRAMES, tick)
 }
 
 /** Tool-activity chevron nudge for a tick. Pure, modular, constant-width. */
-export function toolFrame(tick: number): string {
-  return cycle(TOOL_FRAMES, tick)
+export function toolFrame(tick: number, env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? ASCII_TOOL_FRAME : cycle(TOOL_FRAMES, tick)
 }
 
 /** Thinking-verb shimmer cell for a tick. Pure, modular, constant-width. */
-export function thinkingFrame(tick: number): string {
-  return cycle(THINKING_FRAMES, tick)
+export function thinkingFrame(tick: number, env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? ASCII_THINKING_FRAME : cycle(THINKING_FRAMES, tick)
 }
 
 /** Queued agents always render this static mark, regardless of tick. */
-export function queuedFrame(): string {
-  return QUEUED_FRAME
+export function queuedFrame(env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? ASCII_QUEUED_FRAME : QUEUED_FRAME
+}
+
+/** Empty-state mark; ASCII terminals get the same three-node rhythm. */
+export function emptyMark(env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? ASCII_EMPTY_MARK : EMPTY_MARK
 }
 
 export type MotionState = { busy: boolean; live: boolean; composerActive: boolean }

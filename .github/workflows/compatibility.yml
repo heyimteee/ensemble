@@ -1,0 +1,59 @@
+name: Compatibility
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "26.12.1"
+
+jobs:
+  opencode:
+    name: OpenCode ${{ matrix.opencode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ticket #257: every host in the declared peer range must run both the
+        # native host contract probe and the deterministic fake smoke.
+        opencode: ["2.2.6", "2.2.7"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux
+      - name: Install OpenCode
+        run: npm install --global "@opencode/cli@${{ matrix.opencode }}"
+      - run: npm ci
+      - name: Preflight host tools
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ matrix.opencode }}
+        run: npm run test:live:preflight
+      - name: Native host contract probe
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+          # The probe record is privacy-checked before this path is used.
+          ENSEMBLE_PROBE_OUT: ${{ runner.temp }}/native-host-contract-${{ matrix.opencode }}.jsonl
+        run: npm run test:live:probe
+      - name: Deterministic fake smoke
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+        run: npm run test:live:fake:all
+      - name: Upload sanitized host contract record
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-contract-${{ matrix.opencode }}
+          path: ${{ runner.temp }}/native-host-contract-${{ matrix.opencode }}.jsonl
+          if-no-files-found: ignore

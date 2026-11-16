@@ -664,7 +664,7 @@ export function FullApprovalsView(props: {
       }}</For>
       <For each={props.resolved}>{(entry) => (
         <box flexDirection="column">
-          <text fg={approvalResolvedTone(entry.ageMs, process.env) === "good" ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" truncate>{approvalResolvedLine(entry.approval)}</text>
+          <text fg={approvalResolvedTone(entry.ageMs, process.env) === "good" ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" truncate>{approvalResolvedLine(entry.approval, process.env)}</text>
           <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{short(entry.approval.detail, 80)}</text>
         </box>
       )}</For>

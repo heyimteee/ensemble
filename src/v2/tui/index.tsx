@@ -1,6 +1,10 @@
 import { Plugin } from "@opencode/plugin/tui"
+import { assertSupportedNode } from "../node-version.ts"
 import { EnsembleV2App } from "./app.tsx"
 import { globalEntries } from "./keymap.ts"
+
+// Ticket #258: the TUI can load independently of the server plugin.
+assertSupportedNode()
 
 export default Plugin.define({
   id: "ensemble.v2.tui",

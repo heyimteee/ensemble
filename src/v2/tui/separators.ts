@@ -10,11 +10,18 @@
 export const CHROME_SEPARATOR = "│"
 export const ASCII_SEPARATOR = "|"
 
+/**
+ * Ticket #259: one ASCII-mode predicate for chrome separators, motion frames,
+ * and status marks. `ENSEMBLE_ASCII=1|true` is explicit; `TERM=dumb` is the
+ * automatic terminal fallback.
+ */
+export function isAsciiTerminal(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.ENSEMBLE_ASCII === "1" || env.ENSEMBLE_ASCII === "true" || env.TERM === "dumb"
+}
+
 /** The separator for this process. Unicode unless the terminal is ASCII-only. */
 export function chromeSeparator(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.ENSEMBLE_ASCII === "1" || env.ENSEMBLE_ASCII === "true") return ASCII_SEPARATOR
-  if (env.TERM === "dumb") return ASCII_SEPARATOR
-  return CHROME_SEPARATOR
+  return isAsciiTerminal(env) ? ASCII_SEPARATOR : CHROME_SEPARATOR
 }
 
 /** Join chrome parts with ` │ ` (or the ASCII fallback). */

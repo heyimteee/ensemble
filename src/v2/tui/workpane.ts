@@ -30,12 +30,15 @@ export const SHELL_VIEW_INSET = 2
 export const WORK_PANE_HORIZONTAL_CHROME = 4
 
 /**
- * Ticket #243: the Work pane's widest share. The chat is the primary surface;
- * on a very wide terminal the Work pane should stay a task board, not become a
- * second transcript. Sixty columns keeps the full Work header and a readable
- * one-card row, and leaves the reclaimed width to the chat.
+ * Ticket #243/#263: the Work pane's widest share. The chat is the primary
+ * surface; on a very wide terminal the Work pane should stay a task board, not
+ * become a second transcript. Fifty-three columns is the narrowest pane that
+ * still fits one full-width card: 49 content columns is exactly two minimum
+ * cards plus the inter-card gap, which is the card-mode floor. Every column
+ * above that cap goes to the chat, and the narrower pane uses the compact
+ * Work header so its view, counts, and page stay visible.
  */
-export const WORK_PANE_MAX_WIDTH = 60
+export const WORK_PANE_MAX_WIDTH = 53
 
 /**
  * Chat outer chrome: border (2), pane padding (2), transcript right padding
@@ -773,4 +776,49 @@ export function workPaneHeader(
     ? "none yet"
     : `${groups} ${groups === 1 ? "group" : "groups"} · ${active} active · ${done} done`
   return `WORK ${view.toUpperCase()} │ ${summary} │ page ${Math.min(current, pages)}/${pages}`
+}
+
+/**
+ * Ticket #263: the narrow card-mode header. Dropping the done segment keeps
+ * the view name, group/active counts, and page visible at 49 content columns,
+ * where the full header would truncate. Empty work has no done segment to
+ * drop, so it keeps the full form.
+ */
+export function workPaneHeaderCompact(
+  view: WorkView,
+  groupCount: number,
+  activeCount: number,
+  page: number,
+  pageCount: number,
+): string {
+  const groups = Math.max(0, Math.floor(groupCount))
+  const active = Math.max(0, Math.floor(activeCount))
+  const current = Math.max(1, Math.floor(page))
+  const pages = Math.max(1, Math.floor(pageCount))
+  const summary = groups === 0
+    ? "none yet"
+    : `${groups} ${groups === 1 ? "group" : "groups"} · ${active} active`
+  return `WORK ${view.toUpperCase()} │ ${summary} │ page ${Math.min(current, pages)}/${pages}`
+}
+
+/**
+ * Ticket #263: pick the header form for the available content width. The full
+ * header wins whenever it fits; the compact form is used only when the full
+ * header would truncate and the compact form itself fits. Narrower
+ * compact-row widths keep their existing full-header truncation.
+ */
+export function workPaneHeaderForWidth(
+  width: number,
+  view: WorkView,
+  groupCount: number,
+  activeCount: number,
+  doneCount: number,
+  page: number,
+  pageCount: number,
+): string {
+  const cells = Math.max(1, Math.floor(width))
+  const full = workPaneHeader(view, groupCount, activeCount, doneCount, page, pageCount)
+  if (full.length <= cells) return full
+  const compact = workPaneHeaderCompact(view, groupCount, activeCount, page, pageCount)
+  return compact.length <= cells ? compact : full
 }

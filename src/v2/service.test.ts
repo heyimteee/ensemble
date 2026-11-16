@@ -272,6 +272,51 @@ test("service.start installs no event subscriptions on the bootstrap context", a
   }
 })
 
+test("ticket257: service start warns on an unsupported host and stays quiet on a tested host", async () => {
+  const originalWarn = console.warn
+  const warnings: string[] = []
+  const unsupported = fakeContext()
+  ;(unsupported.ctx as any).app = { name: "opencode", version: "opencode v2.2.5", channel: "stable" }
+  const service = new EnsembleV2Service(unsupported.ctx)
+  let stop: (() => Promise<void>) | undefined
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")) }
+  try {
+    stop = await service.start()
+  } finally {
+    console.warn = originalWarn
+  }
+  try {
+    assert.equal(warnings.length, 1, "one preflight warning per service realm")
+    assert.match(warnings[0], /OpenCode 2\.2\.5 is not supported/)
+    assert.match(warnings[0], /2\.2\.6 and 2\.2\.7/)
+    const entry = getGlobalLogger()?.recent({ event: "host.unsupported" }).at(-1)
+    assert.ok(entry, "the warning is recorded for diagnostics")
+    assert.equal(entry.level, "warn")
+    assert.equal(entry.version, "2.2.5")
+    assert.equal("directory" in entry, false, "the compatibility warning carries no paths")
+  } finally {
+    await stop?.()
+  }
+
+  const supported = fakeContext()
+  ;(supported.ctx as any).app = { name: "opencode", version: "2.2.7", channel: "stable" }
+  const supportedWarnings: string[] = []
+  const supportedService = new EnsembleV2Service(supported.ctx)
+  let supportedStop: (() => Promise<void>) | undefined
+  console.warn = (...args: unknown[]) => { supportedWarnings.push(args.map(String).join(" ")) }
+  try {
+    supportedStop = await supportedService.start()
+  } finally {
+    console.warn = originalWarn
+  }
+  try {
+    assert.deepEqual(supportedWarnings, [])
+    assert.equal(getGlobalLogger()?.recent({ event: "host.unsupported" }).length, 0)
+  } finally {
+    await supportedStop?.()
+  }
+})
+
 test("service routes group messages, persists sequence, and restores the active workspace", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()

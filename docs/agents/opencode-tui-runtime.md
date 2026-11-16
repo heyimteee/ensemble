@@ -5,7 +5,7 @@ Read before changing the TUI or host integration, or diagnosing location diverge
 ## Evidence and versions
 
 - **Declared API/source:** the lockfile installs `@opencode/plugin` **2.2.1** and OpenTUI **0.7.0** for checking. Inspect their declarations and shipped implementation using the paths below.
-- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI now pins Node **26.12.1** and OpenCode **2.2.6** for the deterministic fake/empty live job. These are not the same as the pinned type-package version. The [v7 verification](../verification/2026-11-07-v7.md), the [dispatch-budget verification](../verification/2026-11-08-dispatch-budgets.md), the [workspace-v2 verification](../verification/2026-11-09-workspace-v2.md), and the [native host contract probe](../verification/2026-11-10-native-host-contract.md) ran Node **26.12.1** with OpenCode **2.2.6** on Linux/tmux. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
+- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI pins Node **26.12.1** and OpenCode **2.2.6** for the deterministic fake/empty live job; the [compatibility workflow](../../.github/workflows/compatibility.yml) runs both supported hosts, 2.2.6 and 2.2.7, and the [host support range](../compatibility/opencode-host-range.md) records the peer range and runtime warning. These are not the same as the pinned type-package version. The [v7 verification](../verification/2026-11-07-v7.md), the [dispatch-budget verification](../verification/2026-11-08-dispatch-budgets.md), the [workspace-v2 verification](../verification/2026-11-09-workspace-v2.md), and the [native host contract probe](../verification/2026-11-10-native-host-contract.md) ran Node **26.12.1** with OpenCode **2.2.6** on Linux/tmux. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
 - **Repository behavior:** links below describe the current implementation. A passing typecheck establishes agreement with installed types, not compatibility with every installed host. Record `node --version` and `opencode --version` with live results; recheck assumptions when upgrading.
 
 Research proposals are not implemented guarantees. In particular, one local service descriptor does not discover every service process, and a snapshot request is not guaranteed to be free of server-side writes from unrelated maintenance.
@@ -88,11 +88,17 @@ modes, workspace scope, and window budgets;
 and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell.md).
 
 - The root row is Rail | Chat | Work. `workspacePaneWidths` is the only width
-  function: the rail clamps to 26–34, Work takes a responsive share, and chat
-  receives the remainder with a readable minimum. Breakpoints are ≥118
-  (three panes), 96–117 (three panes, compact Work), and <96 (right drawer).
-  `workPaneBodyHeight` is the matching body-height helper. Do not recompute
-  either number in a consumer or test; the size matrix reads these helpers.
+  function: the rail clamps to 26–34, Work takes a responsive share capped at
+  53 columns, and chat receives the remainder with a readable minimum. The
+  53-column cap is the card-mode floor (49 content columns), so a very wide
+  terminal gives the reclaimed width to the chat instead of a second
+  transcript. Breakpoints are ≥118 (three panes), 96–117 (three panes,
+  compact Work), and <96 (right drawer). `workPaneBodyHeight` is the matching
+  body-height helper; `workPaneHeaderForWidth` drops the done segment only
+  when the full Work header would truncate and the compact form fits, keeping
+  the view, group/active counts, and page visible at the cap. Do not
+  recompute either number in a consumer or test; the size matrix reads these
+  helpers.
 - Rail agents group by primary workspace (active, most recent membership,
   Homeless), each appears once, the subline is role only, and `z` or a header
   click toggles a durable collapse group. The Workspaces section is a separate
@@ -263,7 +269,7 @@ client restart is the targeted remedy for a stale TUI graph.
 
 ## Verification gates
 
-Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` installs the locked development dependencies. Run from the repository:
+Use Node **22.23.4+** (the package engine; the unit/typecheck gate is verified on 22.23.4, 24.x, and 26.x), with Node/npm on `PATH`. Live suites run on Node **26.12.1**. `npm ci` installs the locked development dependencies. Run from the repository:
 
 | Command | What it establishes |
 | --- | --- |

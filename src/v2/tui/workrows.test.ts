@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
+import { DERIVED_WORK_STATUSES, workStatusWord } from "../queue.ts"
 import { TIDE_GLYPHS, createTideFreezeState, type TideFreezeState } from "./tide.ts"
 import { nativeSubagentFocusID } from "./nativecards.ts"
 import {
@@ -16,6 +17,7 @@ import {
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
+  needsYouMark,
   orderedWorkItems,
   pendingWorkLabel,
   queuedActivityFrame,
@@ -26,6 +28,7 @@ import {
   terminalAnnouncement,
   terminalAnnouncements,
   retryCardDetail,
+  workCardContentWidth,
   workCardDetail,
   workCardForTask,
   workCardForTaskCached,
@@ -593,6 +596,43 @@ test("ticket160: budget labels preserve the card right edge and yield before the
   assert.equal(at(40), "hops 3/8 · cmd 21 left", "full label at a wide card")
 })
 
+test("ticket263: a 53-column card keeps its title, status, and budget readable", () => {
+  const width = workCardContentWidth(49)
+  assert.equal(width, 44, "the 53-column card leaves 44 content cells")
+  const budget = { usedHops: 0, maxHops: 8, commandRemaining: 24, commandMaxHops: 24 }
+  const card = workCardForTask(
+    task({
+      state: "working",
+      claimedBy: "run",
+      leaseUntil: 9_000,
+      attempts: 1,
+      title: "Refactor the dispatch ledger reconciliation path",
+    }),
+    "SizeAgent1",
+    { now: 1_000, width, budgetFor: () => budget },
+  )
+  const header = workCardHeaderText({ ...card.header, glyph: "⠋" })
+  assert.equal(header.length, width, "the header keeps the card's exact right edge")
+  assert.equal(card.header.name, "SIZEAGENT1", "the full agent name survives at the card-mode floor")
+  assert.equal(card.header.status, "WORKING", "the status word is never truncated")
+  assert.ok(header.endsWith("⠋ WORKING"), "the status stays at the right edge")
+  assert.equal(card.header.budget.trimEnd(), "hops 0/8 · cmd 24 left", "the richest budget label still fits")
+  assert.equal(card.title.length, width - 2, "the title truncates to the text width")
+  assert.ok(card.title.startsWith("Refactor the dispatch"), "the title keeps a readable prefix")
+  assert.ok(card.title.endsWith("…"), "the title ellipsizes rather than overflowing")
+  assert.ok(card.detail.length <= width - 2, "the detail stays inside the card")
+
+  const needsYou = workCardForTask(task({ interrupted: true }), "SizeAgent1", {
+    now: 1_000,
+    width,
+    budgetFor: () => budget,
+  })
+  const needsYouHeader = workCardHeaderText({ ...needsYou.header, glyph: NEEDS_YOU_MARK })
+  assert.equal(needsYouHeader.length, width, "the widest status still keeps the exact right edge")
+  assert.ok(needsYouHeader.endsWith("◆ NEEDS YOU"), "the widest status word is never truncated")
+  assert.ok(needsYou.header.budget.length > 0, "the budget yields to the widest status but stays visible")
+})
+
 test("ticket160: compact rows carry the budget without moving the right edge", () => {
   const budget = { usedHops: 5, maxHops: 8, commandRemaining: 16, commandMaxHops: 24 }
   for (let width = 16; width <= 120; width++) {
@@ -847,6 +887,86 @@ test("ticket137: state words are uppercase and queued never reads as pending", (
   assert.equal(workCardStateWord("stalled", false), "STALLED")
   assert.equal(workCardStateWord("cancelled", false), "CANCELLED")
   assert.equal(workCardStateWord("working", true), "NEEDS YOU")
+})
+
+test("ticket259: every Work status has a glyph, a word, and a tone", () => {
+  const tones = ["good", "warn", "bad", "muted", "faint"]
+  for (const status of DERIVED_WORK_STATUSES) {
+    const glyph = workGlyph(status)
+    assert.equal([...glyph].length, 1, `${status} glyph is one terminal cell`)
+    assert.match(glyph, /\S/, `${status} glyph is visible`)
+    const word = workStatusWord(status)
+    assert.ok(word.length > 0, `${status} has a state word`)
+    assert.match(word, /^[A-Z ]+$/, `${status} state word is plain uppercase text`)
+    assert.ok(workStatusLabel(status).length > 0, `${status} has a lower-case label`)
+    const stateTones = workCardTones(status, false)
+    for (const key of ["glyph", "status", "bar"] as const) {
+      assert.ok(tones.includes(stateTones[key]), `${status} ${key} tone is a palette role`)
+    }
+    assert.ok(workCardDetail(status, {}).length > 0, `${status} detail is text`)
+  }
+})
+
+test("ticket259: errors and approvals carry text, not only color", () => {
+  const failed = task({
+    state: "replied",
+    outcome: "failed",
+    failure: { kind: "native", reason: "provider-error" },
+    error: "provider unavailable",
+    repliedAt: 10,
+    finishedAt: 10,
+  })
+  const announcement = terminalAnnouncement(failed, "Sage", 20)
+  assert.ok(announcement?.includes("failed"), announcement ?? "missing announcement")
+  assert.ok(announcement?.includes("provider unavailable"), announcement ?? "missing announcement")
+  const failedCard = workCardForTask(failed, "Sage", { now: 20, width: 60 })
+  assert.equal(failedCard.header.status, "FAILED")
+  assert.equal(failedCard.detail, "failed")
+
+  const cancelled = task({ state: "replied", outcome: "succeeded", stoppedAt: 10, repliedAt: 10, finishedAt: 10 })
+  assert.ok(terminalAnnouncement(cancelled, "Sage", 20)?.includes("cancelled"))
+
+  const approval = task({ interrupted: true })
+  const approvalCard = workCardForTask(approval, "Nova", { now: 20, width: 60 })
+  assert.equal(approvalCard.header.status, "NEEDS YOU")
+  assert.equal(approvalCard.detail, "waiting for you…")
+  assert.equal(workCardDetail("needs_you", {}), "waiting for you…")
+  assert.equal(workCardDetail("needs_you", { needsYou: true }), "waiting for you…")
+})
+
+test("ticket259: ASCII mode keeps every Work status readable without Unicode glyphs", () => {
+  const ascii = { ENSEMBLE_ASCII: "1" }
+  for (const status of DERIVED_WORK_STATUSES) {
+    const glyph = workGlyph(status, ascii)
+    assert.match(glyph, /^[\x20-\x7e]$/, `${status} ASCII glyph is one printable ASCII cell`)
+    assert.equal(workRowFrame(status, 1, ascii), glyph, `${status} ASCII frame is the static glyph`)
+    assert.equal(workRowFrame(status, 9, ascii), glyph, `${status} ASCII frames never animate`)
+    assert.ok(workStatusWord(status).length > 0, `${status} keeps its state word`)
+  }
+  assert.equal(needsYouMark(ascii), "!")
+  assert.equal(needsYouMark({}), NEEDS_YOU_MARK)
+  const failed = task({
+    state: "replied",
+    outcome: "failed",
+    failure: { kind: "native", reason: "provider-error" },
+    error: "provider unavailable",
+    repliedAt: 10,
+    finishedAt: 10,
+  })
+  const announcement = terminalAnnouncement(failed, "Sage", 20, ascii)
+  assert.match(announcement ?? "", /^x /, "the failure mark is ASCII")
+  assert.ok(announcement?.includes("failed") && announcement.includes("provider unavailable"), announcement ?? "missing announcement")
+})
+
+test("ticket259: NO_COLOR freezes motion but keeps state words, glyphs, and tones", () => {
+  const card = cardWithMotion(
+    task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
+    "Nova",
+    { now: 1000, tick: 9, width: 40, env: { NO_COLOR: "1" } },
+  )
+  assert.equal(card.header.glyph, "⠋", "reduced motion pins the working frame")
+  assert.equal(card.header.status, "WORKING", "the state word survives color suppression")
+  assert.deepEqual(card.tones, { glyph: "warn", status: "muted", bar: "warn" })
 })
 
 test("ticket170: every non-terminal status keeps the Work block mounted", () => {
