@@ -18,7 +18,9 @@ import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } 
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock } from "./init-block.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { FALLBACK_REPLIES } from "./execution.ts"
-import { stripEnsembleBlock } from "./workspace-config.ts"
+import { stripEnsembleBlock, workspaceConfigPath } from "./workspace-config.ts"
+import { diagnoseLocations } from "./doctor.ts"
+import { normalizeSnapshot, readLocationConfig } from "./doctor-cli.ts"
 import { getGlobalLogger } from "./logging.ts"
 
 type Handlers = {
@@ -26,6 +28,7 @@ type Handlers = {
   revision: (input: unknown) => Promise<any>
   "changes.since": (input: unknown) => Promise<any>
   invoke: (input: unknown) => Promise<any>
+  diagnostic: (input: unknown) => Promise<any>
 }
 
 function fakeContext(sharedValues?: Map<string, unknown>) {
@@ -137,6 +140,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
         handlers.revision = value.revision
         handlers["changes.since"] = value["changes.since"]
         handlers.invoke = value.invoke
+        handlers.diagnostic = value.diagnostic
         return {
           events: {
             emit: async (name: string, data: any) => {
@@ -15641,6 +15645,195 @@ test("ticket230: shadow skips internal service prompts instead of comparing them
     const state = await snapshotFor(handlers, directory)
     assert.equal(state.messages["w"], undefined)
     assert.equal(Object.keys(state.subtasks).length, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket273: backup export, restore, and rollback preserve durable state and doctor agrees", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-273-backup-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", role: "Engineering" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    assert.equal(nova.ok && sage.ok, true)
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    assert.equal(workspace.ok, true)
+
+    const exported = await handlers.invoke({ directory, action: "backup.export", payload: {} })
+    assert.equal(exported.ok, true)
+    assert.equal(exported.result.backup.formatVersion, 1)
+    assert.equal(exported.result.backup.counts.agents, 2)
+    assert.equal(exported.result.backup.counts.workspaces, 1)
+
+    const renamed = await handlers.invoke({ directory, action: "agent.update", payload: { id: nova.result.id, name: "Nova Prime" } })
+    assert.equal(renamed.ok, true)
+
+    const refused = await handlers.invoke({ directory, action: "backup.restore", payload: { backup: exported.result.backup } })
+    assert.equal(refused.ok, false)
+    assert.equal(refused.error?.code, "confirmation_required")
+
+    const restored = await handlers.invoke({
+      directory,
+      action: "backup.restore",
+      payload: { backup: exported.result.backup, confirmation: "RESTORE" },
+    })
+    assert.equal(restored.ok, true, JSON.stringify(restored))
+    assert.equal(restored.result.workspaces.restored, 1)
+    assert.equal(restored.result.rollbackSlot.written, true)
+
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.agents[nova.result.id].name, "Nova")
+    assert.equal(Object.keys(snapshot.state.workspaces).length, 1)
+    const config = JSON.parse(readFileSync(workspaceConfigPath(directory), "utf8"))
+    assert.equal(config.leader, "Nova")
+
+    // Doctor must accept restored state: storage, config, bindings, and agents agree.
+    const diagnostic = await handlers.diagnostic({ directory })
+    const report = diagnoseLocations([{
+      directory,
+      configPath: workspaceConfigPath(directory),
+      service: { id: null, pid: null, version: null },
+      snapshot: normalizeSnapshot(diagnostic, directory),
+      config: readLocationConfig(directory),
+    }])
+    assert.deepEqual(report.mismatches, [])
+    assert.equal(report.ok, true)
+
+    const status = await handlers.invoke({ directory, action: "backup.status", payload: {} })
+    assert.equal(status.ok, true)
+    assert.equal(status.result.rollback.present, true)
+    assert.equal(status.result.rollback.valid, true)
+
+    const rerouted = await handlers.invoke({ directory, action: "agent.update", payload: { id: nova.result.id, name: "Nova Prime" } })
+    assert.equal(rerouted.ok, true)
+    const wrong = await handlers.invoke({ directory, action: "backup.rollback", payload: {} })
+    assert.equal(wrong.ok, false)
+    assert.equal(wrong.error?.code, "confirmation_required")
+    const rolled = await handlers.invoke({ directory, action: "backup.rollback", payload: { confirmation: "ROLLBACK" } })
+    assert.equal(rolled.ok, true, JSON.stringify(rolled))
+    const afterRollback = await handlers.snapshot({ directory })
+    assert.equal(afterRollback.state.agents[nova.result.id].name, "Nova Prime")
+
+    // Logs carry counts and versions only, never roster names or content.
+    const logged = JSON.stringify([
+      ...(getGlobalLogger()?.recent({ event: "service.backup.exported" }) ?? []),
+      ...(getGlobalLogger()?.recent({ event: "service.backup.restored" }) ?? []),
+      ...(getGlobalLogger()?.recent({ event: "service.backup.rolled_back" }) ?? []),
+    ])
+    assert.equal(logged.includes("Nova"), false)
+    assert.equal(logged.includes(directory), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket273: a failed restore leaves the service state recoverable and the slot usable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-273-recover-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id], leaderID: nova.result.id },
+    })
+    assert.equal(workspace.ok, true)
+    const exported = await handlers.invoke({ directory, action: "backup.export", payload: {} })
+    assert.equal(exported.ok, true)
+    const renamed = await handlers.invoke({ directory, action: "agent.update", payload: { id: nova.result.id, name: "Nova Prime" } })
+    assert.equal(renamed.ok, true)
+
+    const originalSet = ctx.storage.set
+    let writes = 0
+    ctx.storage.set = async (key: string, value: unknown) => {
+      writes += 1
+      if (writes === 2) throw new Error("disk full")
+      return originalSet(key, value)
+    }
+    let failed: any
+    try {
+      failed = await handlers.invoke({
+        directory,
+        action: "backup.restore",
+        payload: { backup: exported.result.backup, confirmation: "RESTORE" },
+      })
+    } finally {
+      ctx.storage.set = originalSet
+    }
+    assert.equal(failed.ok, false)
+    assert.equal(failed.error?.code, "restore_failed_rolled_back")
+    const recovered = await handlers.snapshot({ directory })
+    assert.equal(recovered.state.agents[nova.result.id].name, "Nova Prime")
+
+    // A second failure that cannot self-recover still leaves the slot.
+    let permanent = 0
+    ctx.storage.set = async (key: string, value: unknown) => {
+      permanent += 1
+      if (permanent >= 2) throw new Error("disk full")
+      return originalSet(key, value)
+    }
+    let unrecovered: any
+    try {
+      unrecovered = await handlers.invoke({
+        directory,
+        action: "backup.restore",
+        payload: { backup: exported.result.backup, confirmation: "RESTORE" },
+      })
+    } finally {
+      ctx.storage.set = originalSet
+    }
+    assert.equal(unrecovered.ok, false)
+    assert.equal(unrecovered.error?.code, "restore_failed")
+
+    const slot = await handlers.invoke({ directory, action: "backup.status", payload: {} })
+    assert.equal(slot.result.rollback.present, true)
+    const rolled = await handlers.invoke({ directory, action: "backup.rollback", payload: { confirmation: "ROLLBACK" } })
+    assert.equal(rolled.ok, true, JSON.stringify(rolled))
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.agents[nova.result.id].name, "Nova Prime")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket273: recovery refuses while active work is running", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-273-busy-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const imported = await handlers.invoke({ directory, action: "backup.export", payload: {} })
+    assert.equal(imported.ok, true)
+    const runs = (service as any).activeRuns as Map<string, unknown>
+    runs.set("run_273", { id: "run_273" })
+    try {
+      const refused = await handlers.invoke({
+        directory,
+        action: "backup.restore",
+        payload: { backup: imported.result.backup, confirmation: "RESTORE" },
+      })
+      assert.equal(refused.ok, false)
+      assert.equal(refused.error?.code, "busy")
+      const rollback = await handlers.invoke({ directory, action: "backup.rollback", payload: { confirmation: "ROLLBACK" } })
+      assert.equal(rollback.error?.code, "busy")
+    } finally {
+      runs.clear()
+    }
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

@@ -1859,6 +1859,27 @@ export class V2Store {
     return this.pendingReconciliations.size
   }
 
+  /**
+   * Ticket #273: rebuild the in-memory projection after a restore replaced
+   * storage outside the mutation path. The caller owns the storage
+   * transaction; this re-reads it and publishes an explicit feed reset because
+   * the change ring cannot describe the difference. No storage is written.
+   */
+  async reload(): Promise<void> {
+    await this.write(async () => {
+      const previousPublished = this.lastPublishedVersion
+      await this.load()
+      this.lastPublishedVersion = this.state.version
+      this.onPatch?.({
+        epoch: this.epochValue,
+        from: previousPublished,
+        version: this.state.version,
+        entries: [],
+        reset: true,
+      })
+    })
+  }
+
   async reset(): Promise<void> {
     await this.write(async () => {
       const previousPublished = this.lastPublishedVersion
@@ -1905,6 +1926,15 @@ export class V2Store {
   /** Resolve after every queued mutation has persisted. */
   async settled(): Promise<void> {
     await this.writeTail
+  }
+
+  /**
+   * Ticket #273: run one non-store storage transaction on the serialized write
+   * queue, so a backup restore cannot interleave with an entity write. The
+   * callback must not call back into the store.
+   */
+  async runExclusive<T>(work: () => Promise<T>): Promise<T> {
+    return this.write(work)
   }
 
   /**

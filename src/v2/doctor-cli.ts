@@ -177,7 +177,7 @@ export function validateServerUrl(value: string): string {
   return value.replace(/\/+$/, "")
 }
 
-function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
+export function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
   const state = (output as any)?.state
   if (!state || typeof state !== "object") throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has no state object.`)
   if (!state.agents || typeof state.agents !== "object" || Array.isArray(state.agents)) throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has no agents map.`)

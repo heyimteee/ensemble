@@ -390,6 +390,25 @@ geometries; running the full scenario at a smaller height can fail because a
 finalized rich reply is not visible in the shorter pane, not because the Work
 layout is wrong.
 
+## Backup and restore
+
+`npm run backup` is the operator client for ticket #273's durable-state
+recovery path. It calls the running service's existing `ensemble.v2` RPC
+`invoke` method and resolves the same service descriptor as `doctor`:
+
+```sh
+npm run backup -- export --out ./ensemble-backup.json "$PWD"
+npm run backup -- status "$PWD"
+npm run backup -- restore --in ./ensemble-backup.json --confirm RESTORE "$PWD"
+npm run backup -- rollback --confirm ROLLBACK "$PWD"
+```
+
+`export` writes an owner-only (`0600`) file atomically and prints counts only.
+`restore` and `rollback` refuse while work is running and never print
+conversation content or credentials. The document contains conversation
+content: keep it private. The full procedure, format, and failure behavior are
+in [backup and restore](../docs/operations/backup-restore.md).
+
 ## Issue hygiene
 
 `npm run issue:hygiene` is a read-only GitHub listing for tracker cleanup. It
