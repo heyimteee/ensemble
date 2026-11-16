@@ -1,10 +1,11 @@
 # Security policy
 
-Ensemble is an OpenCode plugin that runs inside the host process with the host's
-filesystem access. It stores team state in the host plugin storage, writes a
-small set of project files under `<workspace>/.ensemble/` and an `AGENTS.md`
-block, and drives native OpenCode sessions. This policy covers that plugin, its
-published package, and its documentation.
+Ensemble is distributed as the `@heyimteee/ensemble` OpenCode plugin. It runs
+inside the host process with the host's filesystem access. It stores team state
+in the host plugin storage, writes a small set of project files under
+`<workspace>/.ensemble/` and an `AGENTS.md` block, and drives native OpenCode
+sessions. This policy covers that plugin, its published package, and its
+documentation.
 
 - **Threat model:** [docs/security/threat-model.md](docs/security/threat-model.md)
 - **Permission-model review:** [docs/security/permission-model-review.md](docs/security/permission-model-review.md)

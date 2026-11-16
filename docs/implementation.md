@@ -904,4 +904,4 @@ never committed. They must not be attached to public issues without review.
 - Real mouse-drag copy remains manual because tmux does not reliably inject drag gestures; the pane-bound selection/copy policy is unit-covered.
 - The host keeps old plugin pages mounted; the route gate prevents stale key ownership but cannot force the host to dispose them.
 - The large TUI application component remains a follow-up.
-- No npm package or license has been selected; `package.json` is private at version 0.1.0, which is not a published release.
+- The package is `@heyimteee/ensemble` under the MIT license; version 0.1.0 is not a published release yet.
