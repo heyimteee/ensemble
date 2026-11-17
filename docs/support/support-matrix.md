@@ -15,7 +15,7 @@ channel and response expectations.
 | Platform | Status | Evidence | Notes |
 |---|---|---|---|
 | Linux with tmux | **Supported** | [Production-readiness partials E2E](../verification/2026-11-16-prod-partials-e2e.md), the deterministic fake suites, and the real TUI acceptance | The tested terminal host is tmux 3.5a on Linux. Other terminals on Linux are untested. |
-| macOS with Herdr | **Supported for the installed path; 1.7 pending** | [macOS/Herdr record](../verification/2026-11-16-ticket-277.md) | Installed `0.1.0-rc.2`, six server tools, TUI route in Herdr/Ghostty, checklist except 1.7, and the fake E2E pass. Mouse drag 1.7 was **NOT RUN**; no selection/copy claim. Herdr prefix ownership is inconclusive host evidence. |
+| macOS with Herdr | **Supported for the installed path on OpenCode 2.2.7; 1.7 pending** | [macOS/Herdr record](../verification/2026-11-16-ticket-277.md) | Installed `0.1.0-rc.2` on OpenCode 2.2.7, six server tools, TUI route in Herdr/Ghostty, checklist except 1.7, and the fake E2E pass. Mouse drag 1.7 was **NOT RUN**; no selection/copy claim. Herdr prefix ownership is inconclusive host evidence. OpenCode 2.3.0 on macOS is not claimed. |
 | Windows | **Out of scope** | None | Native Windows is not tested and is not a supported platform. Do not assume PowerShell, WSL, or a Windows terminal behaves like the Linux path. |
 | Other Unix-like hosts | **Untested** | None | No support claim. |
 
@@ -94,6 +94,8 @@ symptom through the [support policy](README.md) if it is not listed.
   package or a loopback registry.
 - **Host support is narrow.** Only OpenCode 2.2.6, 2.2.7, and 2.3.0 are tested.
   Other releases load with a warning and may break in untested ways.
+- **macOS/Herdr is verified on OpenCode 2.2.7 only.** The 2.3.0 support claim is
+  Linux-verified; macOS 2.3.0 is not claimed.
 - **Live evidence is platform-bound.** The real-model acceptance is opt-in and
   not part of the PR gate. A local run without the pinned tools is not CI
   evidence.

@@ -18,14 +18,15 @@ The release-candidate verification tag is `rc-0.1.0-rc.2` at `d74fc3d`. It
 predates the #281–#284 fixes, so it is an evidence base, not a publish source,
 and it must not be moved. The fixed 2.2.x runtime was installed and checked on
 macOS from the build at `70f3da7`. #285 changes the CI workflows and contract
-checker; #286 adds OpenCode 2.3.0 support and the compatibility context. The
-final-tip install at `a0c39c0` passed on 2.2.7, and the 2.2.7 and 2.3.0 4-hour
-soaks both passed at `b194b95`; see the
+checker; #286 adds OpenCode 2.3.0 support and the compatibility context; #287
+hardens the live TUI readiness with no product runtime change. The final-tip
+install at `a0c39c0` passed on 2.2.7, and the 2.2.7 and 2.3.0 4-hour soaks both
+passed at `b194b95`; see the
 [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence)
-and the [soak record](../verification/2026-11-17-soak.md). At `a0c39c0`,
-Verify, Docs, and Node Matrix are green; the Compatibility rerun is still in
-progress, so the `OpenCode 2.3.0` required context is not yet claimed green.
-If any runtime source changes, rerun the clean-install proof before tagging.
+and the [soak record](../verification/2026-11-17-soak.md). Required CI at
+`a7f1eb3` is green on the first attempt with no job rerun: Verify,
+Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix. If any
+runtime source changes, rerun the clean-install proof before tagging.
 
 See the [release notes](release-notes-0.1.0-rc.2.md), [launch
 plan](launch-plan-0.1.0-rc.2.md), [candidate

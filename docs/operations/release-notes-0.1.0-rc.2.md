@@ -155,10 +155,6 @@ logs. Maintainer response targets are best effort, not an SLA.
   [soak record](../verification/2026-11-17-soak.md).
 - **macOS/Herdr is verified on OpenCode 2.2.7 only.** The 2.3.0 support claim
   is Linux-verified; macOS 2.3.0 is not claimed.
-- **The OpenCode 2.3.0 required CI context is pending.** Verify, Docs, and Node
-  Matrix are green at `a0c39c0`, but the Compatibility rerun is in progress
-  after an initial `typed text did not reach the TUI: s` failure on all three
-  host versions. Do not claim the 2.3.0 context green until confirmed.
 - **macOS size-matrix load probe is Linux-only.** Exact sizes pass with the
   load probe skipped. Braille glyphs depend on terminal font fallback on the
   tested Mac.
@@ -168,9 +164,9 @@ logs. Maintainer response targets are best effort, not an SLA.
 ## Proven and pending
 
 The final-tip runtime checks at `b194b95` established the 2.2.x evidence. The
-latest tip `a0c39c0` adds OpenCode 2.3.0 support (#286) and reruns the
-final-tip install and fake E2E. The clean install is still a loopback-registry
-check, not a public npm install.
+latest tip `a7f1eb3` adds OpenCode 2.3.0 support (#286), hardens live TUI
+readiness (#287), and passes the full required CI matrix on the first attempt.
+The clean install is still a loopback-registry check, not a public npm install.
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -178,8 +174,9 @@ check, not a public npm install.
 | Final-tip install at `a0c39c0` (Linux, OpenCode 2.2.7) | **PASS** | 507,907 bytes; six native tools, TUI route, `/ensemble`; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence) |
 | Earlier install at `b194b95` (Linux, OpenCode 2.2.7) | **PASS** | 124 runtime files, 507,824 bytes; six native tools, TUI route, `/ensemble`; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence) |
 | Deterministic fake E2E at `a0c39c0` (2.2.7 and 2.3.0) | **PASS** | `fake` 416 s on each host; 2.3.0 host probe 14/14, size matrix PASS, loopback install PASS; [parent #268 record](../verification/2026-11-17-ticket-268.md#opencode-230-support-286) |
-| OpenCode 2.3.0 support (#286) | **PASS (Linux); required CI context PENDING** | Supported range `2.2.6 || 2.2.7 || 2.3.0`; compatibility matrix and ruleset context added. macOS/Herdr remains 2.2.7 only. |
-| Required CI at `a0c39c0` | **PARTIAL: Verify/Docs/Node PASS; Compatibility PENDING** | Verify, Docs, and Node Matrix green. Compatibility rerun in progress after initial `typed text did not reach the TUI: s` on all three host versions; the `OpenCode 2.3.0` context is not yet claimed green. [Parent record](../verification/2026-11-17-ticket-268.md#required-ci-at-a0c39c0) |
+| OpenCode 2.3.0 support (#286) | **PASS** | Supported range `2.2.6 || 2.2.7 || 2.3.0`; compatibility matrix and ruleset context added. macOS/Herdr remains 2.2.7 only. |
+| Live TUI readiness (#287) | **PASS** | Harness false positive after Backspace (`:setting` → retype `s` → `:settings` restored); statusline-gated open and deterministic retype ordering. No product runtime change; 2,121 tests. |
+| Required CI at `a7f1eb3` | **PASS (first attempt, no rerun)** | Verify (`verify`, `live-fake`, `live-native`, `live-multilocation`, `latency-smoke`), Compatibility (2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix green. [Parent record](../verification/2026-11-17-ticket-268.md#required-ci-at-a7f1eb3) |
 | Six native tools, installed TUI route, `/ensemble` | **PASS** | [#279](../verification/2026-11-16-ticket-279.md), [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS/Herdr install, TUI, fake E2E, checklist except 1.7 | **PASS except 1.7** | [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS/Herdr on OpenCode 2.3.0 | **PENDING (not claimed)** | Only 2.2.7 is verified on macOS/Herdr. |

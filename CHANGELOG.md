@@ -82,10 +82,15 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 - CI live jobs and the compatibility matrix build `dist` after `npm ci`, and a
   contract test rejects a live workflow that omits the build. This fixed the
   release-blocking post-#279 CI failure. (#285)
+- The live harness no longer reports a false lost-key failure after Backspace:
+  it waits for `:settings` to disappear before retyping and opens the Ensemble
+  page only after the statusline is rendered. No product runtime change.
+  (#287)
 
 ### Verified
 
-- `npm run verify` and `npm run docs:check` on the release candidate.
+- `npm run verify` (2,121 tests) and `npm run docs:check` on the release
+  candidate.
 - Final-tip install at `a0c39c0` in an isolated OpenCode 2.2.7 / Node 26.12.1
   host: PASS; 507,907 bytes; six native server tools, installed TUI route, and
   `/ensemble` loaded. The earlier `b194b95` install passed at 124 runtime
@@ -93,16 +98,11 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 - Deterministic fake E2E at `a0c39c0`: OpenCode 2.2.7 and 2.3.0 PASS with
   `fake` 416 s each. The 2.3.0 host probe passed 14/14, the size matrix passed,
   and the loopback install passed.
-- Required CI at `4ccc410` was green: Verify (`verify`, `live-fake`,
-  `live-native`, `live-multilocation`, `latency-smoke`), Compatibility
-  (OpenCode 2.2.6 and 2.2.7), Docs, and Node Matrix. Verify and Compatibility
-  each needed one rerun of failed jobs with no code change; the first attempts
-  hit CI timing flakes (`filtering spawned fd per keystroke (13 -> 14)` and
-  `typed text did not reach the TUI: s`). This was not a clean first pass.
-- At `a0c39c0`, Verify, Docs, and Node Matrix are green. The Compatibility
-  rerun is in progress after an initial `typed text did not reach the TUI: s`
-  failure on all three host versions; the `OpenCode 2.3.0` required context is
-  not yet claimed green.
+- Required CI at `a7f1eb3` is green on the first attempt with no job rerun:
+  Verify (`verify`, `live-fake`, `live-native`, `live-multilocation`,
+  `latency-smoke`), Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs,
+  and Node Matrix. The earlier `a0c39c0` Compatibility failure and `4ccc410`
+  reruns are superseded.
 - The `b194b95` install and 2.2.x fake evidence still applies to the 2.2.x
   runtime; #286 adds the 2.3.0 host range and is verified separately at
   `a0c39c0`.
@@ -139,10 +139,6 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
   formal host-range merge but the workload and 2.3.0 behavior are unchanged.
 - **macOS/Herdr is verified on OpenCode 2.2.7 only.** The 2.3.0 support claim
   is Linux-verified; macOS 2.3.0 is not claimed.
-- **The OpenCode 2.3.0 required CI context is pending.** Verify, Docs, and Node
-  Matrix are green at `a0c39c0`, but the Compatibility rerun is in progress
-  after an initial `typed text did not reach the TUI: s` failure on all three
-  host versions. Do not claim the 2.3.0 context green until it is confirmed.
 - **The macOS size-matrix load probe is Linux-only.** The size matrix passes
   with the load probe skipped; Braille glyphs depend on terminal font fallback
   on the tested Mac.

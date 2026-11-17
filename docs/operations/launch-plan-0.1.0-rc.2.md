@@ -67,9 +67,9 @@ files, or unredacted logs.
 
 1. **Approve the candidate.** The release manager reviews
    [the sign-off](release-signoff.md), records the date and name, and
-   explicitly accepts or clears each pending item: macOS 1.7, the pending
-   OpenCode 2.3.0 required CI context, and the package-downgrade gap. Both
-   supported Linux hosts passed the 4-hour soak.
+   explicitly accepts or clears each pending item: macOS 1.7 and the
+   package-downgrade gap. Both supported Linux hosts passed the 4-hour soak,
+   and required CI is green on all three OpenCode versions.
 2. **Freeze the release commit.** Merge the approved release commit; every
    required check in [the release guide](release.md) must be green. No runtime
    change after the last clean-install evidence without a re-run.
@@ -143,6 +143,5 @@ There is no telemetry, so success is judged from public signals:
   run.
 - Windows support, paid support, hosted service, or a marketing campaign.
 - Claiming a macOS or non-Linux 4-hour soak. Both supported Linux hosts passed
-  the 4-hour gate; macOS 2.3.0 and a green OpenCode 2.3.0 required CI context
-  are not claimed. The macOS mouse-drag check and Herdr prefix ownership
-  remain pending or inconclusive until recorded.
+  the 4-hour gate; macOS 2.3.0 is not claimed. The macOS mouse-drag check and
+  Herdr prefix ownership remain pending or inconclusive until recorded.
