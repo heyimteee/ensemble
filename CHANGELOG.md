@@ -6,49 +6,150 @@ All notable changes to Ensemble are recorded here. The format follows
 
 The tag-driven release workflow reads the `## [<version>]` section for the
 version in `package.json` and uses it as the GitHub release body. A version
-without a non-empty section is refused by the release preflight. Ticket #278
-owns the final `0.1.0` notes and the launch sign-off; the entries below are the
-release scaffolding, not the launch announcement.
+without a non-empty section is refused by the release preflight. The
+`0.1.0-rc.2` entry is the current candidate note; the final public version and
+announcement remain pending. These entries are release history, not a launch
+announcement.
 
 ## [Unreleased]
 
-- OpenCode 2.3.0 is in the supported host range. The compatibility matrix,
-  peer range, and runtime preflight accept 2.2.6, 2.2.7, and 2.3.0; the
-  deterministic live harness accepts the host's `#eeeeee` high-contrast focus
-  text alongside exact white (ticket #286).
-- Final `0.1.0` release notes, launch plan, and the macOS/Herdr verification
-  record land with ticket #278 and #277.
+- The public version, release tag, GitHub release, and announcement are pending
+  the human-gated publish in #278. The candidate remains `0.1.0-rc.2`; no
+  version bump is planned for the remaining manual check.
 
 ## [0.1.0-rc.2] - 2026-11-16
 
 Release candidate for the first public package release: one MIT-licensed
-OpenCode plugin package containing the server and TUI parts.
+OpenCode plugin package containing the server and TUI parts. The candidate
+identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
+#281–#284 fixes. It is not published at the time of this entry.
 
 ### Added
 
-- `@heyimteee/ensemble` package identity with the MIT license, scoped npm
-  name, repository metadata, and a runtime-only `dist` allowlist.
-- A Solid-compiled TUI build so the installed package loads its server, TUI,
-  and RPC entries from compiled JavaScript.
-- A clean-install proof through `opencode plugin add` against isolated
-  OpenCode 2.2.7 hosts, including the six server tools and the `/ensemble` TUI
-  route.
-- Threat model, permission-model review, accepted risks, and dependency update
-  automation.
-- Data retention, export, delete, and the AGENTS v7 roster disclosure guidance.
-- Backup/restore, upgrade, and package/state rollback guides with an injected
-  failure rehearsal.
-- Incident runbook, support intake, support matrix, and issue/PR templates.
-- A tag-driven release workflow with a token-free dry run, npm provenance,
-  a CycloneDX SBOM, and changelog-based GitHub release notes.
-- A release sign-off checklist covering security, license, package contents,
-  rollback, support readiness, and the clean-install proof.
+- MIT license and the `@heyimteee/ensemble` npm identity: scoped name, public
+  publish configuration, repository/homepage/bugs metadata, and a runtime-only
+  `dist` allowlist. (#269)
+- A built package: the server, TUI, and RPC entries are compiled JavaScript,
+  the TUI uses the Solid OpenTUI transform, and the TUI runtime dependencies
+  resolve from the installed plugin cache. (#279, #280)
+- A clean-install proof through `opencode plugin add` into isolated OpenCode
+  2.2.7 hosts: six native server tools, the installed TUI route, and the
+  `/ensemble` command. (#279; #270 records the superseded `0.1.0-rc.1` TUI
+  failure)
+- A security baseline: threat model, permission-model review, accepted risks,
+  `SECURITY.md` supported-version and private-reporting policy, Dependabot
+  updates, and containment for a handoff symlink escape. (#271)
+- Data classes and retention, a scoped JSON export, workspace delete, and the
+  AGENTS v7 roster title/role disclosure guidance. (#272)
+- Versioned backup/restore, additive upgrade notes, and package/state rollback
+  with a rehearsed failed-restore path. (#273)
+- Support intake through GitHub Issues, an incident runbook, a support matrix,
+  and issue/PR templates with redaction rules. (#274)
+- A tag-driven release workflow: token-free dry run, changelog-based notes,
+  npm provenance, CycloneDX SBOM, and a release sign-off checklist. (#275)
+- A repeatable fake soak harness, a redacted local support bundle, and an
+  explicit no-telemetry/local-diagnostics policy. (#276)
+- macOS/Herdr verification of the installed package through SSH: install, TUI
+  route, fake E2E, and the full manual checklist including 1.7 pane-bounded
+  Shift+drag with explicit copy. Automatic copy-on-release is not claimed.
+  (#277)
+- OpenCode 2.3.0 support: the supported range is now
+  `2.2.6 || 2.2.7 || 2.3.0`, the compatibility matrix and required context
+  include 2.3.0, and the Linux checks pass (host probe 14/14, size matrix,
+  fake E2E 416 s, loopback install). macOS/Herdr remains verified on 2.2.7
+  only. (#286)
+
+### Changed
+
+- The published package ships compiled `dist/` JavaScript instead of raw
+  TypeScript; `prepack` builds and typechecks the runtime closure. The tarball
+  contains only `package.json`, `README.md`, `LICENSE`, and `dist/`.
+- macOS/Herdr is verified for the installed path, including the full manual
+  checklist. Mouse selection 1.7 requires Shift+drag and an explicit copy.
+
+### Fixed
+
+- An init interrupted by a service restart now restores `AGENTS.md` to its
+  exact prior bytes and removes `.ensemble/init.json`; a workspace with no
+  prior file is returned to no file. (#281)
+- `NO_COLOR` now suppresses Work-card, border, statusline, and Braille color
+  decoration while keeping state text and glyphs. (#282)
+- `NO_COLOR` now also suppresses transcript agent-author and Markdown colors.
+  (#284)
+- The Work feed is reconstructed from durable state after a service restart,
+  with one group header and one card per task and no manual reload. (#283)
+- The newest settled native-session state is retained when the cap is reached;
+  an active turn, inbox, row, watchdog, or deferred child is never evicted.
+  (#276)
+- CI live jobs and the compatibility matrix build `dist` after `npm ci`, and a
+  contract test rejects a live workflow that omits the build. This fixed the
+  release-blocking post-#279 CI failure. (#285)
+- The live harness no longer reports a false lost-key failure after Backspace:
+  it waits for `:settings` to disappear before retyping and opens the Ensemble
+  page only after the statusline is rendered. No product runtime change.
+  (#287)
 
 ### Verified
 
-- `npm run verify` and `npm run docs:check` on the release candidate.
+- `npm run verify` (2,121 tests) and `npm run docs:check` on the release
+  candidate.
+- Final-tip install at `a0c39c0` in an isolated OpenCode 2.2.7 / Node 26.12.1
+  host: PASS; 507,907 bytes; six native server tools, installed TUI route, and
+  `/ensemble` loaded. The earlier `b194b95` install passed at 124 runtime
+  files and 507,824 bytes.
+- Deterministic fake E2E at `a0c39c0`: OpenCode 2.2.7 and 2.3.0 PASS with
+  `fake` 416 s each. The 2.3.0 host probe passed 14/14, the size matrix passed,
+  and the loopback install passed.
+- Required CI at `a7f1eb3` is green on the first attempt with no job rerun:
+  Verify (`verify`, `live-fake`, `live-native`, `live-multilocation`,
+  `latency-smoke`), Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs,
+  and Node Matrix. The earlier `a0c39c0` Compatibility failure and `4ccc410`
+  reruns are superseded.
+- The `b194b95` install and 2.2.x fake evidence still applies to the 2.2.x
+  runtime; #286 adds the 2.3.0 host range and is verified separately at
+  `a0c39c0`.
+- An enforced 4-hour soak at `b194b95` passed on both supported hosts:
+  OpenCode 2.2.7 had 240 samples over 14,439 s and 5,234 messages, 0 failures,
+  baseline/tail/peak RSS 672.8/1,010.09/1,153.89 MiB, growth 92.59 MiB/h
+  (gate 256) and 18.71 MiB/1k messages (gate 64), queue/native settled, no
+  findings; OpenCode 2.3.0 had 240 samples, 5,240 messages, 0 failures,
+  688.91/1,034.59/1,229.56 MiB, 94.89 MiB/h and 19.14 MiB/1k, settled, no
+  findings.
 - The deterministic fake and native E2E matrices on OpenCode 2.2.6 and 2.2.7.
 - The Node 22.23.4, 24.22.1, and 26.12.1 unit/typecheck matrix.
+- The installed `0.1.0-rc.2` package on Linux (loopback registry) and macOS
+  (Herdr/Ghostty), including the six server tools, the TUI route, and the full
+  macOS checklist. 1.7 passed with a pane-bounded Shift+drag over the composer
+  marker and an explicit `copy_to_clipboard`; the statusline stayed
+  `INSERT │ COMPOSER │ Group chat`, and mode/focus were unchanged. Automatic
+  copy-on-release is not claimed because Ghostty `copy-on-select` is off.
+
+### Known limitations
+
+- **Not published yet.** The public npm version/tag, GitHub release, and
+  announcement are pending human approval. This section is a candidate note,
+  not a launch announcement.
+- **Windows is out of scope.** Native Windows and WSL are untested.
+- **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
+  passed with a pane-bounded Shift+drag and explicit copy. Ghostty
+  `copy-on-select` is off, so a drag alone does not copy; this is a host
+  preference. Cmd+C/Cmd+V passed.
+- **Herdr prefix control is inconclusive.** The host test did not produce a tab
+  or pane; no Ensemble key was observed to be intercepted, but the host-level
+  claim is not proven.
+- **Git-spec installs fail upstream in OpenCode 2.2.7.** `github:` and
+  `git+https://` specs fail during git dependency preparation; use the npm
+  package or the loopback registry.
+- **No telemetry.** Ensemble does not upload logs or usage data; diagnostics
+  are local and must be redacted before sharing.
+- **The 4-hour soak passed on both supported Linux hosts.** The enforced gate
+  passed on OpenCode 2.2.7 and 2.3.0 at `b194b95`; the 2.3.0 run predates the
+  formal host-range merge but the workload and 2.3.0 behavior are unchanged.
+- **macOS/Herdr is verified on OpenCode 2.2.7 only.** The 2.3.0 support claim
+  is Linux-verified; macOS 2.3.0 is not claimed.
+- **The macOS size-matrix load probe is Linux-only.** The size matrix passes
+  with the load probe skipped; Braille glyphs depend on terminal font fallback
+  on the tested Mac.
 
 ## [0.1.0-rc.1] - 2026-11-16
 

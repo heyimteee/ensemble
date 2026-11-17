@@ -3,7 +3,7 @@
 ## Product
 
 - [Project overview](../README.md)
-- [Changelog](../CHANGELOG.md): release scaffolding; the tag-driven workflow uses the matching version section as the GitHub release body
+- [Changelog](../CHANGELOG.md): release history and the `0.1.0-rc.2` candidate notes; the tag-driven workflow uses the matching version section as the GitHub release body
 - [Domain glossary](../GLOSSARY.md)
 - [Implementation and acceptance notes](implementation.md)
 - [Scale, soak, and local diagnostics](operations/scale-and-monitoring.md): operating envelope, soak/leak harness, support bundle, and no-telemetry policy
@@ -49,21 +49,25 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Upgrade from the pre-release](operations/upgrade.md): native-first defaults, AGENTS v7, the native-state refactor, and additive durable-state migrations
 - [Package rollback](operations/rollback.md): package-only and state rollback, plus the rehearsed failure path
 - [Release operations](operations/release.md): the tag-driven workflow, the token-free dry run, main protection and its 11 real check contexts, provenance, the SBOM, and the changelog-based GitHub release
-- [Release sign-off checklist](operations/release-signoff.md): security, MIT license/legal, package contents, clean-install proof, rollback, support readiness, publish, and post-release checks
+- [Release notes for 0.1.0-rc.2](operations/release-notes-0.1.0-rc.2.md): the public-facing candidate notes, install/upgrade/rollback path, support route, and known limitations
+- [Launch plan for 0.1.0-rc.2](operations/launch-plan-0.1.0-rc.2.md): audience, channels, support path, rollback triggers, and the human-gated publish/announce sequence
+- [Release sign-off checklist](operations/release-signoff.md): the completed candidate sign-off plus the final pre-tag gate for security, MIT license/legal, package contents, clean-install proof, rollback, support readiness, publish, and post-release checks
 
 ## Verification
 
+- [Public release readiness — parent #268](verification/2026-11-17-ticket-268.md): the `0.1.0-rc.2` version/tag decision, every child ticket result including the #285 CI build fix, #286 OpenCode 2.3.0 support, #287 live TUI readiness, and #277 macOS verification, the final-tip install/fake/soak evidence, the green required CI at `a7f1eb3`, the full macOS checklist including 1.7, the READY FOR PUBLISH APPROVAL decision, and the remaining human-gated publish steps
 - [Live TUI readiness after opening Ensemble](verification/2026-11-17-ticket-287.md): statusline-gated `live_open_ensemble`, a header-only guard test, the deterministic command-line retype ordering, and passing 2.3.0/2.2.7 fake suites
+- [Four-hour enforced soak — 0.1.0-rc.2 final tip](verification/2026-11-17-soak.md): PASS on both supported hosts, OpenCode 2.2.7 and 2.3.0, with 240 samples over 14,439 s each, 0 failures, settled queue/native state, and growth within both gates
 - [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence
 - [OpenCode 2.3.0 compatibility](verification/2026-11-17-ticket-286.md): the host-range expansion, the 2.3.0 and 2.2.7 fake E2E runs, the passing host probe, the high-contrast focus-tone harness fix, the size matrix, and the loopback install proof
 - [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
 - [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
 - [Clean-install release candidate](verification/2026-11-16-ticket-270.md): the loopback-registry `opencode plugin add` proof, the installed server tools and package source, and the exact TUI source-package load failure deferred to #279
 - [Built package for the installed TUI plugin](verification/2026-11-16-ticket-279.md): the Solid-compiled `dist` build, runtime dependency resolution in the plugin cache, the passing `0.1.0-rc.2` TUI route and `/ensemble` command, and the runtime-only pack guard
-- [macOS/Herdr verification via SSH](verification/2026-11-16-ticket-277.md): the macOS `0.1.0-rc.2` install and six server tools, the installed TUI route in Herdr/Ghostty, the AppleScript-driven checklist evidence, the macOS fake E2E, and the Git-spec/Herdr-prefix findings
+- [macOS/Herdr verification via SSH](verification/2026-11-16-ticket-277.md): the macOS `0.1.0-rc.2` install and six server tools, the installed TUI route in Herdr/Ghostty, the full checklist including 1.7 pane-bounded Shift+drag with explicit copy, the macOS fake E2E, and the Git-spec/Herdr-prefix findings
 - [Security and privacy audit](verification/2026-11-16-ticket-271.md): threat model and permission review, the handoff symlink containment fix, `npm audit` baseline and accepted risks, Dependabot configuration, and the passing verify/docs gates
 - [Backup/restore and upgrade/rollback](verification/2026-11-16-ticket-273.md): the versioned backup document, the service RPC and operator CLI, the automatic rollback slot, the injected-failure recovery rehearsal, restored-state doctor compatibility, and the upgrade/rollback guides
-- [Scale/soak and local diagnostics](verification/2026-11-16-ticket-276.md): the fake soak harness and smoke record, the tested operating envelope, the redacted support bundle, the no-telemetry policy, and the settled native-session cap fix
+- [Scale/soak and local diagnostics](verification/2026-11-16-ticket-276.md): the fake soak harness, the tested operating envelope, the redacted support bundle, the no-telemetry policy, and the settled native-session cap fix; the final-tip 4-hour result is in the [soak record](verification/2026-11-17-soak.md)
 - [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
 - [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
 - [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix

@@ -5,6 +5,37 @@ records the release workflow, the main-branch protection, the credential
 boundary, and the dry-run rehearsal. Use
 [the release sign-off checklist](release-signoff.md) before creating the tag.
 
+## Current candidate
+
+The release candidate is `@heyimteee/ensemble@0.1.0-rc.2`. No version bump or
+rebuild is planned for the remaining manual check. The public release is
+**not approved**; the final public version and tag are cut on the approved
+commit after the human-gated publish decision. If the artifact stays at
+`0.1.0-rc.2`, the matching release tag is `v0.1.0-rc.2` and the dist-tag is
+`next`; a final `0.1.0` is a separate version and tag.
+
+The release-candidate verification tag is `rc-0.1.0-rc.2` at `d74fc3d`. It
+predates the #281–#284 fixes, so it is an evidence base, not a publish source,
+and it must not be moved. The fixed 2.2.x runtime was installed and checked on
+macOS from the build at `70f3da7`. #285 changes the CI workflows and contract
+checker; #286 adds OpenCode 2.3.0 support and the compatibility context; #287
+hardens the live TUI readiness with no product runtime change. The final-tip
+install at `a0c39c0` passed on 2.2.7, and the 2.2.7 and 2.3.0 4-hour soaks both
+passed at `b194b95`; see the
+[parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence)
+and the [soak record](../verification/2026-11-17-soak.md). Required CI at
+`a7f1eb3` is green on the first attempt with no job rerun: Verify,
+Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix. The
+full macOS checklist including 1.7 is PASS (closed #277 at `7efd9a6`);
+automatic copy-on-release is not claimed. All verification gates are complete,
+and the candidate is ready for publish approval. If any runtime source changes,
+rerun the clean-install proof before tagging.
+
+See the [release notes](release-notes-0.1.0-rc.2.md), [launch
+plan](launch-plan-0.1.0-rc.2.md), [candidate
+sign-off](release-signoff.md#candidate-sign-off--010-rc2-2026-11-17), and
+[parent #268 verification](../verification/2026-11-17-ticket-268.md).
+
 ## Required checks and main protection
 
 `main` is protected by the repository ruleset **main protection** (ruleset id
@@ -120,9 +151,11 @@ missing export fails before any upload.
 
 ### Tagged release
 
-1. Update `CHANGELOG.md` and let #278 close the notes and launch sign-off.
-2. Bump `version` in `package.json` and `package-lock.json`; open the release
-   pull request and let every required check pass.
+1. Approve the candidate and its notes, launch plan, and sign-off (#278). The
+   current candidate is `0.1.0-rc.2`; bump the version only if the approved
+   artifact or version decision changes.
+2. Confirm `version` in `package.json` and `package-lock.json` agree; open the
+   release pull request and let every required check pass.
 3. Merge to `main`, then tag the merge commit:
    ```sh
    version=$(node -p "require('./package.json').version")
