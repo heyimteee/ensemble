@@ -29,6 +29,14 @@ question: where you are, who is talking, and what the team is doing.
   drawer. `Space b l` and `Space b r` toggle the left and right columns at any
   width, and the choice survives a restart.
 
+<DocsFigure
+  src="/media/workspace-shell.png"
+  alt="Three-pane Ensemble workspace at 110 columns: the rail lists Ada, Nova, and Rook under acme-notes; the chat shows a group message; Work shows Ada's WORKING card with the hop budget."
+  caption="The three-pane shell in the synthetic Acme Notes fixture. Work is active while Ada writes the release note. Select the image to open the full-size capture."
+  width="1100"
+  height="680"
+/>
+
 ## Mental model
 
 The three panes are three views over one workspace, not three stores:
@@ -44,10 +52,12 @@ surfaces over the same workspace state, so a change in one pane appears in the
 others without a separate refresh step.
 
 ```mermaid
-flowchart LR
+flowchart TB
+  accTitle: The three-pane workspace shell
+  accDescr: You choose an agent or workspace in the rail, the conversation opens in chat, sent work appears in Work, and a result or native session opens back in chat.
   you(["You"])
   subgraph shell [One workspace]
-    direction LR
+    direction TB
     rail["Rail<br/>Agents by workspace<br/>Workspaces"]
     chat["Chat<br/>group or direct transcript<br/>composer"]
     work["Work<br/>ACTIVE and HISTORY<br/>approvals summary"]
@@ -55,8 +65,10 @@ flowchart LR
   you -- "choose an agent or workspace" --> rail
   rail -- "opens the conversation" --> chat
   chat -- "sends work to the team" --> work
-  work -- "opens a result or native session" --> chat
+  work -. "opens a result or native session" .-> chat
 ```
+
+*Figure: one workspace, three views. The rail navigates, chat records and routes, and Work projects the resulting work items.*
 
 The shell is deliberately stable: focus moves between panes, but the pane
 layout does not change when you open a result, start a turn, or resolve an

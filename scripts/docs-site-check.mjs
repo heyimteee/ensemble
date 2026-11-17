@@ -25,6 +25,7 @@ import {
   sidebar,
   sourceToRoute,
 } from "../docs/.vitepress/site-data.mjs"
+import { checkDocsMedia } from "./docs-media-check.mjs"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -34,6 +35,8 @@ const REQUIRED_FILES = [
   "docs/.vitepress/seo.mjs",
   "docs/.vitepress/theme/index.js",
   "docs/.vitepress/theme/Layout.vue",
+  "docs/.vitepress/theme/DocsFigure.vue",
+  "docs/.vitepress/theme/TerminalHero.vue",
   "docs/.vitepress/theme/custom.css",
   "docs/public/favicon.svg",
   "docs/public/og-image.png",
@@ -229,6 +232,7 @@ export function checkDocsSite() {
   checkNavigation(failures, allPages)
   checkEvidenceReachability(failures, allPages)
   checkRedirects(failures, allPages)
+  for (const failure of checkDocsMedia(REPO_ROOT)) failures.push(`media: ${failure}`)
   return failures
 }
 

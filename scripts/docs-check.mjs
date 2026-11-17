@@ -25,6 +25,7 @@ import {
 } from "../src/v2/host-compatibility.ts"
 import { MINIMUM_NODE_VERSION } from "../src/v2/node-version.ts"
 import { checkReferenceDocs } from "./reference-check.mjs"
+import { checkDocsMedia } from "./docs-media-check.mjs"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -406,6 +407,9 @@ function checkDocs(root = REPO_ROOT) {
   checkSupport(root, failures)
   for (const failure of checkReferenceDocs(root)) {
     failures.push(`reference:check: ${failure}`)
+  }
+  for (const failure of checkDocsMedia(root)) {
+    failures.push(`media: ${failure}`)
   }
 
   return { failures, version, hosts, liveNode }

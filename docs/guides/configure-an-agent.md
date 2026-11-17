@@ -16,6 +16,15 @@ memories, and the Skillbox; memory management has its own guide.
 - Read [Agents, workspaces, and the leader](../concepts/agents-and-workspaces.md)
   and [Skills](../concepts/skills.md) for the concepts behind the fields.
 
+
+<DocsFigure
+  src="/media/settings.png"
+  alt="Ada's settings surface with General, Models, Memories, and Skillbox tabs, identity rows, model summary, and native-mirror toggle."
+  caption="Agent settings open on General and stay a draft until you save. Press h or l to switch tabs; press j or k to move rows; press s to save."
+  width="700"
+  height="930"
+/>
+
 ## Steps
 
 1. Select the agent in the rail and press `s`.

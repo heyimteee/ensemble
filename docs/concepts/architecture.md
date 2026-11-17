@@ -54,6 +54,8 @@ to release stops it. A second process is not a supported writer.
 
 ```mermaid
 flowchart TB
+  accTitle: Ensemble architecture
+  accDescr: You use the TUI plugin, which sends typed RPC to the server plugin; the server drives native sessions through the OpenCode engine and reads and writes durable plugin storage and workspace settings.
   you(["You"])
   tui["Ensemble TUI plugin<br/>Rail · Chat · Work · settings · approvals"]
   server["Ensemble server plugin<br/>workspace state · scheduling · native sessions · RPC · tools"]
@@ -67,8 +69,10 @@ flowchart TB
   server -- "native session API" --> host
   host -- "session and turn events" --> server
   server -- "durable reads and writes" --> store
-  config -- "authoritative workspace settings" --> server
+  server -- "reads workspace settings" --> config
 ```
+
+*Figure: the TUI is a disposable view; the server owns team state; the OpenCode engine owns execution.*
 
 The server is authoritative because the same team state must serve the page, the
 native sessions, and every OpenCode location. The TUI can be closed, reloaded,

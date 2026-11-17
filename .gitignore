@@ -29,6 +29,10 @@ pack-report.json
 *.tgz
 *.cdx.json
 
+# Python bytecode from the optional media renderer
+__pycache__/
+*.pyc
+
 # Editor and operating-system files
 .idea/
 .vscode/

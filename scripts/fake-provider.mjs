@@ -18,6 +18,13 @@ const FAKE_BUBBLE_PROMPT = "fake-bubble-fixture"
 const FAKE_QUEUE_HOLD_PROMPT = "fake-queue-hold"
 const FAKE_QUEUE_HOLD_LONG_PROMPT = "fake-queue-hold-long"
 const FAKE_ASK_PROMPT = "fake-ask-person"
+// Ticket #309: the documentation media harness uses the same isolated fake
+// host but needs synthetic Acme Notes content that reads like a real team
+// exchange. These triggers are natural workspace prose, not marker strings, so
+// captured UI contains no fixture jargon. They are scoped to the latest user
+// message and never change any other scenario's response.
+const DOCS_ACME_RE = /\bacme[- ]notes\b/i
+const DOCS_ACTIVE_RE = /\bdraft the release note\b/i
 // Ticket #225: deterministic tool-surface benchmark. The marker names the
 // peer so the same fake provider can drive a native final-text route or a
 // send_message tool call without knowing the workspace roster.
@@ -144,6 +151,48 @@ const RICH_MARKDOWN = [
 ].join("\n")
 
 const SHORT_REPLY = "Onboarding complete. I am ready.\n"
+
+// Ticket #309 documentation media fixture. The Acme Notes workspace is
+// synthetic; this reply is shaped like a teammate's release-note summary so a
+// captured docs screenshot shows the product's real Markdown rendering rather
+// than a test marker.
+const DOCS_ACME_REPLY = [
+  "# Acme Notes release note",
+  "",
+  "Here is the short version for the team review:",
+  "",
+  "- **Saved searches** now sync after sign-in.",
+  "- **Offline drafts** merge on reconnect and keep the newest edit.",
+  "- **Import cleanup** removes duplicate tags without deleting notes.",
+  "",
+  "## Review notes",
+  "",
+  "The import change is additive. It does not rewrite stored notes, so the",
+  "rollback path stays the same.",
+  "",
+].join("\n")
+
+// A longer, deliberately quiet stream for the ACTIVE Work capture. The harness
+// stops reading once the working card is stable; this content never needs to
+// finish.
+const DOCS_ACTIVE_REPLY = [
+  "# Release note draft",
+  "",
+  "I am checking the open review threads before I finalize the note.",
+  "",
+  "## Saved searches",
+  "",
+  "- Confirm the sync copy and the conflict copy agree.",
+  "- Keep the desktop label unchanged.",
+  "",
+  "## Offline drafts",
+  "",
+  ...Array.from(
+    { length: 48 },
+    (_, index) => `- Draft review line ${index + 1} keeps the turn active while the capture runs.`,
+  ),
+  "",
+].join("\n")
 
 // The host validates compaction responses against its structured-summary
 // template. A short non-template reply is rejected and retried, which blocks
@@ -646,6 +695,11 @@ const server = createServer(async (request, response) => {
     // deterministic replies even though the marker remains in history.
     const veraFinal = Boolean(veraRegression && veraToolResult && body?.stream !== false)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
+    // Ticket #309: only the current user turn selects the docs fixture. A
+    // workspace name in accumulated context must not turn every later reply
+    // into a release note.
+    const docsActive = DOCS_ACTIVE_RE.test(latestUserText)
+    const docsAcme = !docsActive && DOCS_ACME_RE.test(latestUserText)
     const benchmark = latestUserText.match(FAKE_BENCHMARK_RE)
     const benchmarkMode = benchmark?.[1]
     const benchmarkPeer = benchmark?.[2]
@@ -706,6 +760,10 @@ const server = createServer(async (request, response) => {
     const latest = Math.max(richAt, bubbleAt, holdAt, holdLongAt)
     const text = summaryRequest
       ? COMPACTION_SUMMARY
+      : docsActive
+      ? DOCS_ACTIVE_REPLY
+      : docsAcme
+      ? DOCS_ACME_REPLY
       : subagentChild
       ? SUBAGENT_CHILD_MARKDOWN
       : interruptHold
