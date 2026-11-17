@@ -15,6 +15,19 @@ specification.
 - [ ] Verification or CI
 - [ ] Maintenance
 
+## Documentation
+
+User-visible changes must update the docs or record an explicit decision.
+
+- [ ] The change updates `docs/` (or a root documentation file).
+- [ ] The change is not user-visible. Test-only, workflow, and documentation-tooling changes are exempt.
+- [ ] The change is user-visible but documentation is not needed.
+
+If the last option applies, replace the placeholder with a real reason. The
+automated guard reads this one line:
+
+Docs-not-needed: <reason>
+
 ## Verification
 
 | Check | Result |

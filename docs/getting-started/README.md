@@ -1,3 +1,9 @@
+---
+title: Getting started
+description: Choose the install, quickstart, first-team, and upgrade path for a new installation.
+version: 0.1.x
+---
+
 # Getting started
 
 Install Ensemble, open the workspace, and reach your first group reply with a

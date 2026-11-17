@@ -1,3 +1,9 @@
+---
+title: Documentation redirect map
+description: Where entries from the old documentation index moved.
+version: 0.1.x
+---
+
 # Documentation redirect map
 
 The `0.1.x` docs reorganized the old single index into user sections and a

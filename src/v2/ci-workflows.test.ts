@@ -231,6 +231,19 @@ test("the repository keeps the compatibility, Node, and docs workflows and drops
   assert.equal(existsSync(join(repoRoot, ".github/workflows/latency.yml")), false)
 })
 
+test("the docs job installs dependencies and runs the full docs check, including the site build", () => {
+  const text = read(".github/workflows/docs.yml")
+  assert.match(text, /run: npm ci/)
+  assert.match(text, /run: npm run docs:check/)
+  assert.doesNotMatch(text, /run: .*--skip-site-build/)
+})
+
+test("the live-fake job owns the deterministic packed quickstart E2E", () => {
+  assert.ok(PR_LIVE_SUITES["live-fake"]?.includes("test:live:quickstart"))
+  const block = workflowJobs(read(verifyWorkflowPath)).get("live-fake") ?? ""
+  assert.match(block, /run: npm run test:live:quickstart/)
+})
+
 test("the release workflow is tag-driven and dry-runs a manual dispatch", () => {
   const text = read(releaseWorkflowPath)
   assert.deepEqual(checkReleaseWorkflow(text), [])

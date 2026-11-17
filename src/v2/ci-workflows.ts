@@ -34,7 +34,13 @@ export const NIGHTLY_JOB_BUDGET_MINUTES: Readonly<Record<string, number>> = {
 
 /** Deterministic suites owned by each PR live job. A suite runs in exactly one. */
 export const PR_LIVE_SUITES: Readonly<Record<string, readonly string[]>> = {
-  "live-fake": ["test:live:fake:all", "test:live:sizes", "test:live:lifecycle", "test:live:subagent"],
+  "live-fake": [
+    "test:live:fake:all",
+    "test:live:sizes",
+    "test:live:lifecycle",
+    "test:live:subagent",
+    "test:live:quickstart",
+  ],
   "live-native": ["test:live:native-first", "test:live:vera", "test:live:tool-surface"],
   "live-multilocation": ["test:live:multilocation"],
   "latency-smoke": ["test:live:latency"],
@@ -46,6 +52,7 @@ const LIVE_HOST_ACTION = ".github/actions/live-host/action.yml"
 const COMPATIBILITY_WORKFLOW = ".github/workflows/compatibility.yml"
 const NODE_MATRIX_WORKFLOW = ".github/workflows/node-matrix.yml"
 const DOCS_WORKFLOW = ".github/workflows/docs.yml"
+const DOCS_RATIONALE_WORKFLOW = ".github/workflows/docs-rationale.yml"
 const RELEASE_WORKFLOW = ".github/workflows/release.yml"
 const LATENCY_WORKFLOW = ".github/workflows/latency.yml"
 const ARTIFACTS_PATH = "${{ runner.temp }}/ensemble-live-artifacts"
@@ -582,6 +589,47 @@ export function checkCompatibilityWorkflow(text: string, supportedHosts: readonl
   return failures
 }
 
+/**
+ * Ticket #310: the docs-not-needed guard must never execute pull-request code.
+ * It runs from the trusted base checkout under `pull_request_target`, asks for
+ * read-only permissions, and reads only the PR body and file list as data.
+ */
+export function checkDocsRationaleWorkflow(text: string): string[] {
+  const failures: string[] = []
+  const file = "docs-rationale.yml"
+  if (!/^ {2}pull_request_target:\s*$/m.test(text)) {
+    failures.push(`${file}: must trigger on pull_request_target so the base workflow is trusted`)
+  }
+  if (/^ {2}pull_request:\s*$/m.test(text)) {
+    failures.push(`${file}: pull_request would run the workflow definition from the pull request`)
+  }
+  if (!/^permissions:\s*$/m.test(text)) {
+    failures.push(`${file}: permissions must be declared explicitly`)
+  }
+  for (const permission of ["contents: read", "pull-requests: read"]) {
+    if (!text.includes(permission)) failures.push(`${file}: missing read-only permission ${permission}`)
+  }
+  if (/\b(?:contents|pull-requests):\s*write\b/.test(text)) {
+    failures.push(`${file}: permissions must stay read-only`)
+  }
+  if (/secrets\./.test(text)) {
+    failures.push(`${file}: must not read repository secrets`)
+  }
+  if (!text.includes("ref: ${{ github.event.pull_request.base.sha }}")) {
+    failures.push(`${file}: checkout must pin the trusted pull request base commit`)
+  }
+  if (!text.includes("persist-credentials: false")) {
+    failures.push(`${file}: checkout must not persist credentials`)
+  }
+  if (/github\.event\.pull_request\.head/.test(text)) {
+    failures.push(`${file}: must never check out or execute the pull request head`)
+  }
+  if (!text.includes("node --experimental-strip-types scripts/docs-rationale.mjs")) {
+    failures.push(`${file}: missing the docs rationale evaluator`)
+  }
+  return failures
+}
+
 export function checkCiRepository(
   root: string,
   supportedHosts: readonly string[] = SUPPORTED_OPENCODE_VERSIONS,
@@ -593,6 +641,7 @@ export function checkCiRepository(
   const compatibility = readWorkflow(root, COMPATIBILITY_WORKFLOW, failures)
   const nodeMatrix = readWorkflow(root, NODE_MATRIX_WORKFLOW, failures)
   const docs = readWorkflow(root, DOCS_WORKFLOW, failures)
+  const docsRationale = readWorkflow(root, DOCS_RATIONALE_WORKFLOW, failures)
   const release = readWorkflow(root, RELEASE_WORKFLOW, failures)
 
   if (existsSync(join(root, LATENCY_WORKFLOW))) {
@@ -603,6 +652,7 @@ export function checkCiRepository(
   if (action) failures.push(...checkLiveHostAction(action))
   if (compatibility) failures.push(...checkCompatibilityWorkflow(compatibility, supportedHosts))
   if (release) failures.push(...checkReleaseWorkflow(release))
+  if (docsRationale) failures.push(...checkDocsRationaleWorkflow(docsRationale))
 
   // Ticket #262 owns the docs/package contract: `engines.node`, the Node
   // matrix, and `docs:check` must agree with the canonical version constants.

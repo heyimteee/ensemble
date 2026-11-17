@@ -1,3 +1,9 @@
+---
+title: Operations
+description: Back up, upgrade, roll back, diagnose, and release Ensemble safely.
+version: 0.1.x
+---
+
 # Operations
 
 Procedures for running Ensemble safely: back up durable state, upgrade the

@@ -1,3 +1,9 @@
+---
+title: Backup and restore
+description: Back up the durable-state document and workspace config, inspect it, and restore safely.
+version: 0.1.x
+---
+
 # Backup and restore
 
 Ticket #273. This is the recovery path for Ensemble's durable plugin state and

@@ -1,3 +1,9 @@
+---
+title: Accepted security risks
+description: Accepted dependency advisories and residual risks with review dates and controls.
+version: 0.1.x
+---
+
 # Accepted security risks
 
 - **Status:** Active for the 0.1 release candidate
