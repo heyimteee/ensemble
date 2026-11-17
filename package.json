@@ -67,6 +67,8 @@
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
     "logs:summary": "node scripts/log-summary.mjs",
     "docs:check": "node --experimental-strip-types scripts/docs-check.mjs",
+    "docs:reference": "node --experimental-strip-types scripts/reference-gen.mjs",
+    "docs:reference:check": "node --experimental-strip-types scripts/reference-check.mjs",
     "backup": "node scripts/backup.mjs",
     "test:install:rc": "bash scripts/live-install-check.sh",
     "data": "node --experimental-strip-types src/v2/data-cli.ts"

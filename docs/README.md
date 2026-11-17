@@ -27,14 +27,15 @@ separate docs tree.
 
 ### New users
 
-1. Read [what Ensemble does](../README.md#what-it-does) and the
-   [requirements](../README.md#requirements).
-2. Follow the [install path](../README.md#install) for the current stable
-   package, then open Ensemble with `/ensemble`.
-3. Check the [support matrix](support/support-matrix.md) before installing on an
+1. Read [What is Ensemble?](getting-started/what-is-ensemble.md) and check the
+   [support matrix](support/support-matrix.md) before you install on an
    unverified host.
-4. Continue through [Getting started](getting-started/README.md) for the
-   quickstart and first-team walkthrough.
+2. Follow [Install](getting-started/install.md) for the stable `0.1.0` package.
+3. Complete the [Quickstart](getting-started/quickstart.md): two agents, one
+   workspace, one message, and one finished work item.
+4. Continue with [First team](getting-started/first-team.md) to delegate work
+   and open a native session.
+5. Use [Upgrade](getting-started/upgrade.md) when you move from a prerelease.
 
 ### Daily users
 
@@ -52,8 +53,8 @@ separate docs tree.
    items, and dispatch budgets.
 2. Follow [Guides](guides/README.md) to create a workspace, add members, and
    delegate work.
-3. Use [dispatch budgets](adr/0004-dispatch-budgets-and-continuation.md) when you
-   need the full rules behind a refused continuation or a stopped agent.
+3. Look up exact limits and commands in [Reference](reference/README.md) when a
+   delegation is refused or an agent stops.
 4. Review [support and operations](support/README.md) before asking a team to
    depend on the preview.
 
