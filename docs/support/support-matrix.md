@@ -87,10 +87,10 @@ pass without the pinned host and tools is not equivalent to CI evidence.
 These are accepted boundaries, not open troubleshooting threads. Report a new
 symptom through the [support policy](README.md) if it is not listed.
 
-- **Stable `0.1.0` owns npm `latest`.** `@heyimteee/ensemble` publishes stable
-  `0.1.0` on `latest` and `0.1.0-rc.3` on `next`. Pin the exact version in an
+- **Stable `0.1.1` owns npm `latest`.** `@heyimteee/ensemble` publishes stable
+  `0.1.1` on `latest` and `0.1.0-rc.3` on `next`. Pin the exact version in an
   install instruction. See the
-  [0.1.0 release notes](../operations/release-notes-0.1.0.md).
+  [0.1.1 release notes](../operations/release-notes-0.1.1.md).
 - **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
   passed with a pane-bounded Shift+drag and explicit copy. Ghostty
   `copy-on-select` is off, so a drag alone does not copy; this is a host

@@ -12,8 +12,32 @@ prerelease history.
 
 ## [Unreleased]
 
-- No release is pending. `0.1.0` is the stable 0.x release; prereleases remain
-  under the npm `next` tag.
+- No release is pending. `0.1.1` is the current stable release; prereleases
+  remain under the npm `next` tag.
+
+## [0.1.1] - 2026-11-17
+
+Documentation and npm presentation patch. The runtime is identical to `0.1.0`.
+
+### Changed
+
+- The README uses the official Ensemble logo and current full-window captures.
+- Current install, version, support, and operations pages point at `0.1.1`.
+- The VitePress site, generated reference, and evidence index are published
+  from this release commit.
+
+### Unchanged
+
+- No runtime, API, TUI, permission, storage, or supported-host behavior changed.
+- Supported hosts remain OpenCode 2.2.6, 2.2.7, and 2.3.0 on Linux/tmux, with
+  Node 22.23.4 or newer.
+
+### Verified
+
+- `npm run verify`, full `docs:check`, and the docs-site build pass.
+- The full 186-route site review found no layout, asset, console, network, or
+  axe WCAG A/AA violations.
+- The packed-install quickstart reaches a `REPLIED` work item.
 
 ## [0.1.0] - 2026-11-17
 

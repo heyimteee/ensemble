@@ -16,7 +16,7 @@ process. These pages are for operators and maintainers; daily use is covered in
 | Task | Page |
 |---|---|
 | Back up or restore the durable-state document and workspace config | [Backup and restore](backup-restore.md) |
-| Upgrade a prerelease or checkout install to stable `0.1.0` | [Upgrade to stable 0.1.0](upgrade.md) |
+| Upgrade a prerelease or checkout install to stable `0.1.1` | [Upgrade to stable 0.1.1](upgrade.md) |
 | Reverse a package upgrade, with state rollback only when required | [Package rollback](rollback.md) |
 | Resolve a broken workspace, stuck work, or suspected data loss | [Incident runbook](../support/incident-runbook.md) |
 
@@ -34,13 +34,14 @@ process. These pages are for operators and maintainers; daily use is covered in
 |---|---|
 | Run the tag-driven release workflow and dry run | [Release operations](release.md) |
 | Complete the pre-tag sign-off checklist | [Release sign-off checklist](release-signoff.md) |
-| Read the stable `0.1.0` release notes | [Ensemble 0.1.0 release notes](release-notes-0.1.0.md) |
+| Read the stable `0.1.1` release notes | [Ensemble 0.1.1 release notes](release-notes-0.1.1.md) |
 
 ## Release history
 
 These pages are retained as history. Their version claims are scoped to the
 release they describe.
 
+- [Release notes for 0.1.0](release-notes-0.1.0.md)
 - [Release notes for 0.1.0-rc.2](release-notes-0.1.0-rc.2.md)
 - [Launch plan for 0.1.0-rc.2](launch-plan-0.1.0-rc.2.md)
 

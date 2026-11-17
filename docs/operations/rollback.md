@@ -77,7 +77,7 @@ Expected evidence:
 | Busy service | `busy`; nothing is written |
 
 The published prerelease history provides earlier installable versions. Stable
-`0.1.0` has the same runtime as `0.1.0-rc.3`, so a package-only rollback can pin
+`0.1.1` has the same runtime as `0.1.0-rc.3`, so a package-only rollback can pin
 the exact prerelease:
 
 ```sh

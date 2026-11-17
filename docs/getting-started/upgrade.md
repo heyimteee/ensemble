@@ -1,12 +1,12 @@
 ---
 title: Upgrade Ensemble
-description: Move from a 0.1.0 prerelease to stable 0.1.0, verify the workspace, and roll back if needed.
+description: Move from a 0.1.0 prerelease to stable 0.1.1, verify the workspace, and roll back if needed.
 version: 0.1.x
 ---
 
 # Upgrade Ensemble
 
-Move an existing install from a `0.1.0` prerelease to stable `0.1.0`, confirm
+Move an existing install from a `0.1.0` prerelease to stable `0.1.1`, confirm
 that the workspace still opens, and know the rollback path before you start.
 
 ## Before you start
@@ -31,14 +31,14 @@ roll back.
 ## Install stable
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.1
 opencode plugin list
 ```
 
 Expected entry:
 
 ```text
-ensemble.v2  0.1.0  @heyimteee/ensemble@0.1.0
+ensemble.v2  0.1.1  @heyimteee/ensemble@0.1.1
 ```
 
 Restart OpenCode. The plugin and its RPC surface are replaced on the next start;
@@ -116,7 +116,7 @@ content; keep it private.
 
 | Symptom | What to do |
 |---|---|
-| `opencode plugin list` still shows the prerelease | Restart the host, then repeat the install with the exact `0.1.0` version. |
+| `opencode plugin list` still shows the prerelease | Restart the host, then repeat the install with the exact `0.1.1` version. |
 | The workspace does not open | Confirm the host version is supported, then check `:logs` and the host log. |
 | The `AGENTS.md` block changed unexpectedly | The block is reconciled to v7 in place. Review the diff; content outside the markers must be unchanged. |
 | A work item is refused with a budget reason after the upgrade | Capture the work item and ledger state before you retry, then report it through the support path. |

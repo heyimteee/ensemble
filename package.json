@@ -1,6 +1,6 @@
 {
   "name": "@heyimteee/ensemble",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent agent teams inside OpenCode",
   "license": "MIT",
   "author": "heyimteee",
@@ -8,7 +8,7 @@
     "type": "git",
     "url": "git+https://github.com/heyimteee/ensemble.git"
   },
-  "homepage": "https://github.com/heyimteee/ensemble#readme",
+  "homepage": "https://heyimteee.github.io/ensemble/",
   "bugs": {
     "url": "https://github.com/heyimteee/ensemble/issues"
   },

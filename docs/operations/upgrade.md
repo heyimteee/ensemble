@@ -1,15 +1,15 @@
 ---
-title: Upgrade to stable 0.1.0
-description: Move a prerelease or checkout install to the stable 0.1.0 package and verify the workspace.
+title: Upgrade to stable 0.1.1
+description: Move a prerelease or checkout install to the stable 0.1.1 package and verify the workspace.
 version: 0.1.x
 ---
 
-# Upgrade to stable 0.1.0
+# Upgrade to stable 0.1.1
 
-This guide moves an existing workspace to the stable `0.1.0` package. The
-runtime is identical to `0.1.0-rc.3`; the stable release only moves npm `latest`
-to `0.1.0`. The public prerelease history remains `0.1.0-rc.2` and
-`0.1.0-rc.3`.
+This guide moves an existing workspace to the stable `0.1.1` package. The
+runtime is identical to `0.1.0` (and to `0.1.0-rc.3`); `0.1.1` is a
+documentation and npm presentation patch. The public prerelease history remains
+`0.1.0-rc.2` and `0.1.0-rc.3`.
 
 Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6, 2.2.7, and 2.3.0.
 Pin the exact package version rather than a floating tag.
@@ -36,17 +36,17 @@ Pin the exact package version rather than a floating tag.
 4. If a workspace has uncommitted `.ensemble/config.json` edits, decide whether
    they belong in the backup before restoring anything later.
 
-## Install stable 0.1.0
+## Install stable 0.1.1
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.1
 opencode plugin list
 ```
 
 Expected entry:
 
 ```text
-ensemble.v2  0.1.0  @heyimteee/ensemble@0.1.0
+ensemble.v2  0.1.1  @heyimteee/ensemble@0.1.1
 ```
 
 The package entry replaces a linked checkout or older plugin entry. A restart
@@ -113,6 +113,6 @@ opencode plugin add @heyimteee/ensemble@0.1.0-rc.2
 opencode plugin add @heyimteee/ensemble@0.1.0-rc.3
 ```
 
-The [0.1.0 release notes](release-notes-0.1.0.md) record the stable promotion;
+The [0.1.1 release notes](release-notes-0.1.1.md) record the stable promotion;
 the [rc.2 release notes](release-notes-0.1.0-rc.2.md) remain the historical
 prerelease record.

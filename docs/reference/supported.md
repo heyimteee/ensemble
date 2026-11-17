@@ -8,7 +8,7 @@ version: 0.1.x
 
 # Supported hosts and versions
 
-Version scope: stable `0.1.x`, current package `0.1.0`.
+Version scope: stable `0.1.x`, current package `0.1.1`.
 
 ## OpenCode hosts
 
@@ -38,7 +38,7 @@ Only releases exercised by the compatibility matrix belong in this set. A new ho
 | `ENSEMBLE_PROTOCOL_VERSION` | `4` | Service RPC protocol version. |
 | `SHARED_SERVICE_VERSION` | `3` | Process-global shared registry contract. |
 | `BACKUP_FORMAT_VERSION` | `1` | Recovery backup document version. |
-| `package version` | `0.1.0` | Published package version used by install instructions. |
+| `package version` | `0.1.1` | Published package version used by install instructions. |
 
 ## Unsupported-host behavior
 
