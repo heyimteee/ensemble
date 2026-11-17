@@ -21,6 +21,7 @@ import { deriveWorkStatus } from "../queue.ts"
 import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 import { agentColor } from "./format.ts"
+import { isNoColor } from "./theme.ts"
 import { terminalAnnouncement, TRANSCRIPT_WINDOW } from "./workrows.ts"
 
 /** Bounded bubble width: ~72% of the chat column (ticket #67). */
@@ -119,14 +120,20 @@ export function bubbleHead(author: string, relay?: RelayParties): string {
  * still resolve to that agent's color — only generic system (no agent)
  * stays muted, so "Handed to $Clark" / "Answer from $Clark" names are
  * never grey.
+ *
+ * Ticket #284: under `NO_COLOR` the author name and its bubble chrome resolve
+ * to the palette's default text role, so an agent's own color or categorical
+ * fallback cannot leak a concrete SGR color into the transcript.
  */
 export function unifiedAuthorColor(
   line: { agentID?: string; author: string; role: "user" | "agent" | "system" },
   agents: Record<string, Agent | undefined>,
   roster: Agent[],
-  colors: { accent: any; muted: any; good: any; info?: any },
+  colors: { accent: any; muted: any; good: any; info?: any; text?: any },
   categorical: readonly any[],
+  env: NodeJS.ProcessEnv = process.env,
 ): any {
+  if (isNoColor(env)) return colors.text ?? colors.accent
   if (line.role === "user") return colors.good
   if (line.author === SYSTEM_AGENT_NAME) return colors.info ?? colors.accent
   const byID = line.agentID ? agents[line.agentID] : undefined

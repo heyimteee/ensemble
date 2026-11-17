@@ -4,6 +4,7 @@ import type { Subtask } from "../types.ts"
 import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 import { agentColor } from "./format.ts"
+import { isDefaultColor, monochromePalette } from "./theme.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -124,26 +125,58 @@ test("one author color serves transcript rows and activity labels alike", () => 
   const colors = { accent: "#accent", muted: "#muted", good: "#good", info: "#info" }
   const agents = { a: agent() } as Record<string, ReturnType<typeof agent> | undefined>
   const roster = [agent()]
-  const byID = unifiedAuthorColor({ agentID: "a", author: "Nova", role: "agent" }, agents, roster as any, colors, [])
-  const byName = unifiedAuthorColor({ author: "Nova", role: "agent" }, agents, roster as any, colors, [])
+  const byID = unifiedAuthorColor({ agentID: "a", author: "Nova", role: "agent" }, agents, roster as any, colors, [], {})
+  const byName = unifiedAuthorColor({ author: "Nova", role: "agent" }, agents, roster as any, colors, [], {})
   assert.equal(byID, byName)
   assert.equal(byID, agentColor(agent() as any, "#accent", 0, []))
-  assert.equal(unifiedAuthorColor({ author: "You", role: "user" }, agents, roster as any, colors, []), "#good")
-  assert.equal(unifiedAuthorColor({ author: "Ensemble", role: "system" }, agents, roster as any, colors, []), "#muted")
+  assert.equal(unifiedAuthorColor({ author: "You", role: "user" }, agents, roster as any, colors, [], {}), "#good")
+  assert.equal(unifiedAuthorColor({ author: "Ensemble", role: "system" }, agents, roster as any, colors, [], {}), "#muted")
   // Ticket #100: the System Agent is a non-roster display author and reads
   // in the information color, never as an unknown roster agent.
   assert.equal(
-    unifiedAuthorColor({ author: SYSTEM_AGENT_NAME, role: "agent" }, agents, roster as any, colors, []),
+    unifiedAuthorColor({ author: SYSTEM_AGENT_NAME, role: "agent" }, agents, roster as any, colors, [], {}),
     "#info",
   )
   // Ticket #77: a system-authored line that still carries a real agentID
   // resolves the agent color — "Handed to $Nova" names are never grey.
   assert.equal(
-    unifiedAuthorColor({ agentID: "a", author: "Ensemble", role: "system" }, agents, roster as any, colors, []),
+    unifiedAuthorColor({ agentID: "a", author: "Ensemble", role: "system" }, agents, roster as any, colors, [], {}),
     agentColor(agent() as any, "#accent", 0, []),
   )
   // Unknown agents fall back to the accent without throwing.
-  assert.equal(unifiedAuthorColor({ agentID: "zzz", author: "Ghost", role: "agent" }, {}, [], colors, []), "#accent")
+  assert.equal(unifiedAuthorColor({ agentID: "zzz", author: "Ghost", role: "agent" }, {}, [], colors, [], {}), "#accent")
+})
+
+test("ticket284: NO_COLOR resolves every author identity to the default text role", () => {
+  const colors = { accent: "#accent", muted: "#muted", good: "#good", info: "#info", text: "#text" }
+  const identity = agent({ color: "#ff00aa" })
+  const agents = { a: identity } as Record<string, ReturnType<typeof agent> | undefined>
+  const roster = [identity]
+  const agentLine = { agentID: "a", author: "Nova", role: "agent" as const }
+  // Without NO_COLOR the agent's own color still wins.
+  assert.equal(unifiedAuthorColor(agentLine, agents, roster as any, colors, [], {}), "#ff00aa")
+
+  const mono = monochromePalette()
+  const noColor = { NO_COLOR: "" }
+  const byID = unifiedAuthorColor(agentLine, agents, roster as any, mono, mono.categorical, noColor)
+  const byName = unifiedAuthorColor({ author: "Nova", role: "agent" }, agents, roster as any, mono, mono.categorical, noColor)
+  assert.equal(isDefaultColor(byID), true, "the agent author keeps the terminal default foreground")
+  assert.ok(byID.equals(mono.text), "the author resolves to the palette text role")
+  assert.ok(byName.equals(mono.text), "the roster-name fallback collapses too")
+  // User and system author lines carry no identity color either.
+  for (const line of [
+    { author: "You", role: "user" as const },
+    { author: "Ensemble", role: "system" as const },
+    { agentID: "a", author: "Ensemble", role: "system" as const },
+  ]) {
+    const color = unifiedAuthorColor(line, agents, roster as any, mono, mono.categorical, noColor)
+    assert.equal(isDefaultColor(color), true, `${line.role} author must use the default foreground`)
+  }
+  // Any NO_COLOR value (including a non-empty one) is the signal.
+  assert.equal(
+    isDefaultColor(unifiedAuthorColor(agentLine, agents, roster as any, mono, mono.categorical, { NO_COLOR: "1" })),
+    true,
+  )
 })
 
 test("completion entries carry finish time and stable done: IDs", () => {

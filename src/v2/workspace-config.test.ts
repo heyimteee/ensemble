@@ -1,9 +1,9 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { ensureEnsembleDirectory, readEnsembleBlockVersion, readInitMetadata, readWorkspaceConfig, reconcileEnsembleInstructions, stripEnsembleBlock, writeAgentsBlock, writeHandoff, writeInitMetadata, writeWorkspaceConfig } from "./workspace-config.ts"
+import { ensureEnsembleDirectory, readEnsembleBlockVersion, readInitMetadata, readWorkspaceConfig, reconcileEnsembleInstructions, removeInitMetadata, stripEnsembleBlock, writeAgentsBlock, writeHandoff, writeInitMetadata, writeWorkspaceConfig } from "./workspace-config.ts"
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock } from "./init-block.ts"
 import type { Agent, Workspace } from "./types.ts"
 
@@ -110,6 +110,17 @@ test("ticket253: a contract text change at the same version rewrites only the bl
   assert.equal(stripEnsembleBlock(content).trim(), "# Project\n\nKeep me.")
   assert.equal(readInitMetadata(directory).version, ENSEMBLE_BLOCK_VERSION)
   assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, changed), false)
+})
+
+test("ticket281: retracted init metadata stops reconciliation from re-adding a block", () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-retract-"))
+  const prior = "# Prior project guidance\n\nKeep this line.\n"
+  writeFileSync(join(directory, "AGENTS.md"), prior)
+  writeInitMetadata(directory, ENSEMBLE_BLOCK_VERSION)
+  assert.equal(removeInitMetadata(directory), true)
+  assert.equal(existsSync(join(directory, ".ensemble", "init.json")), false)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, ensembleBlock()), false)
+  assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), prior)
 })
 
 test("ticket159: a stale block refreshes without metadata, and a newer block is never downgraded", () => {

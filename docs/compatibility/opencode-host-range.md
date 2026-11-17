@@ -1,9 +1,9 @@
 # OpenCode host support range
 
-Status: **supported on OpenCode 2.2.6 and 2.2.7**
-Tested: 2026-11-12
+Status: **supported on OpenCode 2.2.6, 2.2.7, and 2.3.0**
+Tested: 2026-11-17
 Host: Linux/tmux, Node 26.12.1
-Tickets: [#255](https://github.com/heyimteee/ensemble/issues/255), [#257](https://github.com/heyimteee/ensemble/issues/257)
+Tickets: [#255](https://github.com/heyimteee/ensemble/issues/255), [#257](https://github.com/heyimteee/ensemble/issues/257), [#286](https://github.com/heyimteee/ensemble/issues/286)
 
 Ensemble separates the OpenCode **CLI** release from the
 `@opencode/plugin` **host API** package it ships. The peer range declares the
@@ -17,12 +17,13 @@ they are tracked as separate contracts.
 | --- | --- | --- |
 | **2.2.6** | 2.2.6 | Committed [native host contract](../verification/2026-11-10-native-host-contract.md); `compatibility.yml` runs the host probe and deterministic fake smoke |
 | **2.2.7** | 2.2.7 | [2.2.7 re-verification](../verification/2026-11-10-native-host-contract.md#227-re-verification); `compatibility.yml` runs the host probe and deterministic fake smoke |
+| **2.3.0** | 2.3.0 | [2.3.0 compatibility run](../verification/2026-11-17-ticket-286.md); `compatibility.yml` runs the host probe and deterministic fake smoke |
 
 The canonical constants live in
 [`src/v2/host-compatibility.ts`](../../src/v2/host-compatibility.ts):
 
-- `SUPPORTED_OPENCODE_VERSIONS` — tested CLI releases (`2.2.6`, `2.2.7`).
-- `OPENCODE_PLUGIN_PEER_RANGE` — peer range (`2.2.6 || 2.2.7`).
+- `SUPPORTED_OPENCODE_VERSIONS` — tested CLI releases (`2.2.6`, `2.2.7`, `2.3.0`).
+- `OPENCODE_PLUGIN_PEER_RANGE` — peer range (`2.2.6 || 2.2.7 || 2.3.0`).
 - `OPENCODE_PLUGIN_VERSION_BY_HOST` — CLI-to-API mapping.
 
 `@opencode/plugin` stays an **optional** peer, as do `@opentui/core`,
@@ -40,7 +41,7 @@ claim.
   prints:
 
   ```text
-  [ensemble] OpenCode 2.2.5 is not supported by this Ensemble build; supported hosts are 2.2.6 and 2.2.7 (@opencode/plugin 2.2.6 || 2.2.7). Ensemble will continue, but behavior on this version is untested.
+  [ensemble] OpenCode 2.2.5 is not supported by this Ensemble build; supported hosts are 2.2.6, 2.2.7, and 2.3.0 (@opencode/plugin 2.2.6 || 2.2.7 || 2.3.0). Ensemble will continue, but behavior on this version is untested.
   ```
 
 - A missing or unreadable version stays quiet. The warning never replaces the
@@ -75,8 +76,9 @@ A new OpenCode host is unsupported until all of the following happen together:
 1. Add the CLI release to `SUPPORTED_OPENCODE_VERSIONS` and the mapping.
 2. Widen `OPENCODE_PLUGIN_PEER_RANGE` to the API package it ships.
 3. Add the release to `compatibility.yml`.
-4. Run the host probe and deterministic fake smoke on that release.
-5. Record the result here and in the host-contract verification.
+4. Move the PR/nightly `OPENCODE_VERSION` pin to the new latest host.
+5. Run the host probe and deterministic fake smoke on that release.
+6. Record the result here and in the host-contract verification.
 
 Do not widen the peer range to a floating `2.2.x` line without that evidence.
 The [2.2.1 compatibility report](opencode-2.2.1.md) remains historical,

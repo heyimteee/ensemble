@@ -2,7 +2,7 @@
 
 > **v3 UI and streaming pass.** The v3 work adds real delta streaming, inline composer completions, a searchable member checklist, semantic theme tokens, focus borders, git metadata, and the visible `I` init shortcut. The v2 runtime model and authority boundaries are unchanged.
 
-Status: **developer preview**, compatibility verified on OpenCode 2.2.6 and 2.2.7. The v2 runtime is the default. The v1 preview was removed. The shipped `AGENTS.md` contract v7 (`ENSEMBLE_BLOCK_VERSION = 7`) is the current block; Node 22.23.4 or newer is required for the unit/typecheck gate, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence; see the [host support range](compatibility/opencode-host-range.md).
+Status: **developer preview**, compatibility verified on OpenCode 2.2.6, 2.2.7, and 2.3.0. The v2 runtime is the default. The v1 preview was removed. The shipped `AGENTS.md` contract v7 (`ENSEMBLE_BLOCK_VERSION = 7`) is the current block; Node 22.23.4 or newer is required for the unit/typecheck gate, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence; see the [host support range](compatibility/opencode-host-range.md).
 
 > **Native-first decisions (2026-11-10).** [ADR 0009](adr/0009-conversation-identity-and-sessions.md), [ADR 0010](adr/0010-native-turn-ingestion.md), and [ADR 0011](adr/0011-mention-routing-and-budgets.md) record the decided conversation/session, ingestion, and routing model. Native-first is the default; the legacy explicit-tool path remains only as the documented rollback. Where this document describes an older v2 path, the ADR is authoritative for the target and the current implementation section describes the shipped behavior.
 
@@ -904,4 +904,4 @@ never committed. They must not be attached to public issues without review.
 - Real mouse-drag copy remains manual because tmux does not reliably inject drag gestures; the pane-bound selection/copy policy is unit-covered.
 - The host keeps old plugin pages mounted; the route gate prevents stale key ownership but cannot force the host to dispose them.
 - The large TUI application component remains a follow-up.
-- No npm package or license has been selected; `package.json` is private at version 0.1.0, which is not a published release.
+- The package is `@heyimteee/ensemble` under the MIT license; the built `0.1.0-rc.2` candidate passes the isolated install check and is not a published release yet.

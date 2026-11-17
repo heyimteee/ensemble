@@ -12,12 +12,16 @@ const repoRoot = fileURLToPath(new URL("../..", import.meta.url))
 const COPIED_PATHS = [
   "package.json",
   "README.md",
+  "LICENSE",
   "scripts/README.md",
   "docs/README.md",
   "docs/implementation.md",
   "docs/adr/0011-mention-routing-and-budgets.md",
   "docs/compatibility/opencode-host-range.md",
+  "docs/support",
   "docs/verification",
+  ".github/ISSUE_TEMPLATE",
+  ".github/PULL_REQUEST_TEMPLATE.md",
   ".github/workflows/verify.yml",
   ".github/workflows/compatibility.yml",
   ".github/workflows/node-matrix.yml",
@@ -64,7 +68,7 @@ test("docs-check accepts the current docs and canonical versions", () => {
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /docs:check: ok/)
     assert.match(result.stdout, /contract v7/)
-    assert.match(result.stdout, /OpenCode 2\.2\.6, 2\.2\.7/)
+    assert.match(result.stdout, /OpenCode 2\.2\.6, 2\.2\.7, 2\.3\.0/)
     assert.match(result.stdout, /Node >=22\.23\.4/)
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -130,11 +134,76 @@ test("docs-check derives the tested Node claim from the matrix workflow", () => 
 test("docs-check rejects an untested OpenCode host claim", () => {
   const root = fixtureRepo()
   try {
-    replace(root, "README.md", "OpenCode **2.2.6** and **2.2.7**", "OpenCode **2.2.5** and **2.2.7**")
+    replace(root, "README.md", "OpenCode **2.2.6**, **2.2.7**, and **2.3.0**", "OpenCode **2.2.5**, **2.2.7**, and **2.3.0**")
     const result = run(root)
     assert.equal(result.status, 1)
     assert.match(result.stderr, /README\.md/)
     assert.match(result.stderr, /2\.2\.6/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a README that drops the MIT license claim", () => {
+  const root = fixtureRepo()
+  try {
+    replace(root, "README.md", "Ensemble is released under the [MIT License](LICENSE).", "The license is undecided.")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md.*MIT/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a stale no-license claim", () => {
+  const root = fixtureRepo()
+  try {
+    replace(
+      root,
+      "README.md",
+      "## License\n\nEnsemble is released under the [MIT License](LICENSE).",
+      "## License\n\nA license has not been selected.",
+    )
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md.*license has not been selected/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects an install command that does not match the package name", () => {
+  const root = fixtureRepo()
+  try {
+    replaceAll(root, "README.md", "opencode plugin add @heyimteee/ensemble", "opencode plugin add ensemble")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md.*@heyimteee\/ensemble/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a package license that is not MIT", () => {
+  const root = fixtureRepo()
+  try {
+    replace(root, "package.json", '"license": "MIT"', '"license": "Apache-2.0"')
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /package\.json.*MIT/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a missing LICENSE file", () => {
+  const root = fixtureRepo()
+  try {
+    rmSync(join(root, "LICENSE"))
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /LICENSE: file is missing/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -148,6 +217,42 @@ test("docs-check rejects a current verification record missing from the index", 
     assert.equal(result.status, 1)
     assert.match(result.stderr, /2026-11-13-unlinked\.md/)
     assert.match(result.stderr, /docs\/README\.md/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a README without the support path", () => {
+  const root = fixtureRepo()
+  try {
+    replace(root, "README.md", "docs/support/README.md", "docs/unsupported.md")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md.*docs\/support\/README\.md/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a missing incident runbook", () => {
+  const root = fixtureRepo()
+  try {
+    rmSync(join(root, "docs/support/incident-runbook.md"))
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /docs\/support\/incident-runbook\.md: file is missing/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a template without the redaction warning", () => {
+  const root = fixtureRepo()
+  try {
+    replaceAll(root, ".github/ISSUE_TEMPLATE/bug.yml", "conversation content", "conversation text")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /bug\.yml.*conversation content/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

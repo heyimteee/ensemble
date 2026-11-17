@@ -14,6 +14,17 @@ import { nativeTextForParts, type NativeTextState } from "./native-turn.ts"
 
 export const NATIVE_INBOX_ORDER_LIMIT = 64
 
+/**
+ * Ticket #276: one `NativeSessionState` is kept per native session ever seen in
+ * this service boot. Settled turns release their text, rows, watchdog, and
+ * mappings, but the empty per-session value itself used to live until restart.
+ * A long-running host can create sessions for deleted agents and workspaces, so
+ * idle values are now evicted oldest-first once the map exceeds this cap.
+ * Sessions holding a live execution, inbox order, text, row, watchdog, or
+ * deferred settlement are never evicted.
+ */
+export const NATIVE_SESSION_STATE_LIMIT = 512
+
 export type NativeExecutionOwner = "turn" | "skip"
 
 export type NativeInboxOrderEntry = { inboxID: string; turn: boolean }
@@ -94,8 +105,39 @@ export class NativeIngestionState {
     if (!state) {
       state = new NativeSessionState()
       this.sessions.set(sessionID, state)
+      this.pruneIdleSessions()
     }
     return state
+  }
+
+  /** Number of retained per-session values; diagnostics and tests only. */
+  sessionCount(): number {
+    return this.sessions.size
+  }
+
+  private isIdle(state: NativeSessionState): boolean {
+    return state.order.length === 0
+      && state.pending.length === 0
+      && state.owner === undefined
+      && state.executionTurns.length === 0
+      && state.steered.length === 0
+      && state.activeTurn === undefined
+      && state.pendingExecutions === 0
+      && state.assistantTurns.size === 0
+      && state.text.size === 0
+      && state.rows.size === 0
+      && state.watchdog.size === 0
+      && state.deferred.size === 0
+  }
+
+  /** Evict the oldest settled values. `runSettled` alone is evictable; the
+   * durable turn is authoritative and a duplicate host terminal is idempotent. */
+  private pruneIdleSessions(): void {
+    if (this.sessions.size <= NATIVE_SESSION_STATE_LIMIT) return
+    for (const [sessionID, state] of this.sessions) {
+      if (this.sessions.size <= NATIVE_SESSION_STATE_LIMIT) return
+      if (this.isIdle(state)) this.sessions.delete(sessionID)
+    }
   }
 
   // ---- session.inbox.enqueued --------------------------------------------
@@ -291,6 +333,7 @@ export class NativeIngestionState {
       this.consume(sessionID, input.inboxID)
       this.forgetInbox(sessionID, input.inboxID)
     }
+    this.pruneIdleSessions()
   }
 
   /**
@@ -425,7 +468,11 @@ export class NativeIngestionState {
 
   // ---- session lifecycle -------------------------------------------------
 
-  /** Service stop: release every timer and drop every session value. */
+  /**
+   * Service stop and durable restore: release every timer and drop every
+   * session value. Ticket #273 uses this after a restore because host sessions
+   * from the replaced state cannot own turns in the restored store.
+   */
   clear(): void {
     for (const state of this.sessions.values()) {
       for (const row of state.rows.values()) {

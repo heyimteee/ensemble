@@ -49,6 +49,49 @@ export const PALETTE_UI_ROLES = ["border", "cardFocus", "focus"] as const satisf
 const PALE_BLUE_DARK = "#a8c7fa"
 const PALE_BLUE_LIGHT = "#3b6ea5"
 
+/**
+ * Ticket #282: `NO_COLOR` presence (any value, including the empty string) is
+ * the signal per the no-color convention. This gate is about rendered color
+ * only; reduced motion keeps its separate `ENSEMBLE_REDUCED_MOTION`/`NO_COLOR`
+ * behavior in motion.ts.
+ */
+export function isNoColor(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NO_COLOR !== undefined
+}
+
+/**
+ * Ticket #282: collapse every rendered role to the terminal defaults.
+ * OpenTUI's `RGBA.defaultForeground()`/`defaultBackground()` carry a `default`
+ * color intent, so the renderer emits the terminal's default foreground or
+ * background instead of a concrete RGB value. Bold/dim attributes and every
+ * text/glyph distinction remain, so no state depends on color.
+ */
+export function monochromePalette(): Palette {
+  return {
+    accent: RGBA.defaultForeground(),
+    paleBlue: RGBA.defaultForeground(),
+    info: RGBA.defaultForeground(),
+    muted: RGBA.defaultForeground(),
+    faint: RGBA.defaultForeground(),
+    good: RGBA.defaultForeground(),
+    warn: RGBA.defaultForeground(),
+    bad: RGBA.defaultForeground(),
+    text: RGBA.defaultForeground(),
+    leader: RGBA.defaultForeground(),
+    border: RGBA.defaultForeground(),
+    cardFocus: RGBA.defaultForeground(),
+    panel: RGBA.defaultBackground(),
+    focus: RGBA.defaultForeground(),
+    categorical: [],
+    bg: RGBA.defaultBackground(),
+  }
+}
+
+/** True for an OpenTUI terminal-default color (SGR 39/49), never a concrete RGB value. */
+export function isDefaultColor(color: ThemeColor | null | undefined): boolean {
+  return color instanceof RGBA && color.intent === "default"
+}
+
 export function palette(theme: {
   text: {
     base: RGBA
@@ -60,14 +103,14 @@ export function palette(theme: {
   border: { base: RGBA }
   background?: { base: RGBA; raised?: { base: RGBA; high?: RGBA } }
   hue: { accent: Record<number, RGBA> }
-}, mode?: "dark" | "light"): Palette {
+}, mode?: "dark" | "light", env: NodeJS.ProcessEnv = process.env): Palette {
   const background = (theme as any).background?.raised?.base ?? (theme as any).background?.base
   const panel = background && typeof background === "object" && background.a >= 1 ? background : "#101010"
   // Ticket #137: the host's theme mode is authoritative; fall back to the
   // background luminance so custom themes still get a readable pale blue.
   const backgroundLuminance = relativeLuminance(panel)
   const light = mode ? mode === "light" : backgroundLuminance !== null && backgroundLuminance > 0.5
-  return {
+  const colors: Palette = {
     accent: (theme as any).hue?.accent?.[200] ?? theme.text.feedback.info.base,
     paleBlue: light ? PALE_BLUE_LIGHT : PALE_BLUE_DARK,
     info: theme.text.feedback.info.base,
@@ -89,6 +132,9 @@ export function palette(theme: {
     categorical: (theme as any).categorical ?? [],
     bg: theme.background?.base ?? theme.text.base,
   }
+  // Ticket #282: keep the semantic palette resolution above untouched, then
+  // collapse it to terminal defaults when color decoration is suppressed.
+  return isNoColor(env) ? monochromePalette() : colors
 }
 
 export type ThemeColor = RGBA | string

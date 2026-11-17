@@ -1,12 +1,15 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
+  advanceScopedCursor,
   configMetadataApplies,
   createRefreshCoordinator,
   decideSnapshotApply,
+  decideSnapshotFetch,
   heartbeatDelay,
   isForeignEpochPatch,
   isWorkOnlyPatch,
+  reconnectRequiresReplacement,
   revisionChanged,
   supportsScopedReads,
   type SnapshotMeta,
@@ -135,6 +138,33 @@ test("an unchanged version never replaces entity state, but a metadata revision 
 
 test("a new server epoch replaces even when the restarted store version is lower", () => {
   assert.equal(decideSnapshotApply(meta({ version: 12, epoch: 1 }), meta({ version: 1, epoch: 2 })), "replace")
+})
+
+test("ticket283: a loaded client forces a replacement on reconnect", () => {
+  assert.equal(reconnectRequiresReplacement(undefined), false, "a cold client keeps the cheap bootstrap path")
+  assert.equal(reconnectRequiresReplacement(meta({ version: 7 })), true, "a loaded client cannot trust its cursor across a reconnect")
+})
+
+test("ticket283: a forced snapshot replaces across epochs but refetches a lost same-epoch race", () => {
+  const cursor = meta({ version: 7, epoch: 1 })
+  assert.equal(decideSnapshotFetch(cursor, meta({ version: 1, epoch: 2 }), true), "replace")
+  assert.equal(decideSnapshotFetch(cursor, meta({ version: 6, epoch: 1 }), true), "refetch")
+  assert.equal(
+    decideSnapshotFetch(cursor, meta({ version: 6, epoch: 1 }), false),
+    "skip",
+    "an unforced older response is still dropped",
+  )
+})
+
+test("ticket283: a scoped resync never adopts a foreign service epoch", () => {
+  const cursor = meta({ version: 7, epoch: 1 })
+  assert.deepEqual(advanceScopedCursor(cursor, 1, 8), { ...cursor, version: 8, epoch: 1 })
+  assert.equal(
+    advanceScopedCursor(cursor, 2, 1),
+    undefined,
+    "another epoch only names the scopes it read; the rest still need the full boundary",
+  )
+  assert.equal(advanceScopedCursor(undefined, 2, 1), undefined, "a cursorless client stays on the bootstrap path")
 })
 
 test("the revision check ignores an unchanged metadata revision and accepts catalog or config changes", () => {

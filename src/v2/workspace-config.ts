@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { Agent, Workspace } from "./types.ts"
 
@@ -63,7 +63,6 @@ export function readWorkspaceConfig(directory: string): WorkspaceConfig | undefi
 
 export function writeWorkspaceConfig(workspace: Workspace, agents: Record<string, Agent>): void {
   if (workspace.archived) return
-  ensureEnsembleDirectory(workspace.directory)
   const config: WorkspaceConfig = {
     version: CONFIG_VERSION,
     id: workspace.id,
@@ -73,12 +72,32 @@ export function writeWorkspaceConfig(workspace: Workspace, agents: Record<string
     synthesis: workspace.synthesis,
     paused: workspace.paused,
   }
-  writeFileSync(workspaceConfigPath(workspace.directory), `${JSON.stringify(config, null, 2)}\n`)
+  writeWorkspaceConfigValue(workspace.directory, config)
+}
+
+/**
+ * Ticket #273: write one already-validated config document. Restore keeps the
+ * backed-up authority (names, members) instead of re-deriving it from a
+ * possibly newer roster.
+ */
+export function writeWorkspaceConfigValue(directory: string, config: WorkspaceConfig): void {
+  ensureEnsembleDirectory(directory)
+  writeFileSync(workspaceConfigPath(directory), `${JSON.stringify(config, null, 2)}\n`)
 }
 
 export function writeInitMetadata(directory: string, version: number): void {
   ensureEnsembleDirectory(directory)
   writeFileSync(initMetadataPath(directory), `${JSON.stringify({ version, installedAt: Date.now() }, null, 2)}\n`)
+}
+
+/**
+ * Ticket #281: reconciliation treats init metadata as evidence that the
+ * workspace accepted the contract, so an uncommitted init must retract the
+ * metadata it wrote. Returns whether the file is absent afterwards.
+ */
+export function removeInitMetadata(directory: string): boolean {
+  try { unlinkSync(initMetadataPath(directory)) } catch {}
+  return !existsSync(initMetadataPath(directory))
 }
 
 export function readInitMetadata(directory: string): { version?: number; installedAt?: number } {

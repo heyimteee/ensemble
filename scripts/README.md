@@ -154,6 +154,23 @@ rules are in
   `fd`; `npm run test:live:preflight -- all` also requires and prints it for the
   real scenario. Set `ENSEMBLE_LIVE_EXPECT_NODE` and
   `ENSEMBLE_LIVE_EXPECT_OPENCODE` to fail on a present-but-wrong version.
+- `npm run test:install:rc`: ticket #270's clean-install release-candidate
+  proof. Packs the current package, serves it from a loopback-only npm registry,
+  installs it with `opencode plugin add` into an isolated OpenCode 2.3.0 host,
+  and checks `opencode plugin list`, the installed built package and its TUI
+  dependencies, the server tools, and the TUI route and `/ensemble` command.
+  It uses the loopback registry only for the candidate package; the declared
+  runtime dependencies come from the public npm registry. It needs no public
+  publish or credentials and is not part of PR CI. See the
+  [ticket #279 record](../docs/verification/2026-11-16-ticket-279.md) and the
+  [ticket #270 source-package failure](../docs/verification/2026-11-16-ticket-270.md).
+- `scripts/release-guard.mjs`: ticket #275's release preflight. Validates the
+  triggering ref against `package.json` (a tag push must be exactly
+  `v<version>`; a dispatch is always a dry run), refuses a version with no
+  non-empty `CHANGELOG.md` section, writes `RELEASE_NOTES.md`, and exports
+  `version`, `tag`, `dry-run`, and `dist-tag` to the workflow. It reads no
+  credential. Run it with `--event` and `--ref` locally; see
+  [release operations](../docs/operations/release.md).
 - `npm run test:live:multilocation`: the single-service regression probe. Starts
   the isolated fake host and TUI, creates four channels and eight agents, sends
   100 requests, and asserts one `service.start`, zero `task.failed`, zero
@@ -186,9 +203,11 @@ retries. A failing scenario stops the run and later scenarios are reported as
 PR feedback is split by cost; the expensive environment-sensitive checks are
 nightly. Every live job pins the same toolset through
 [`.github/actions/live-host`](../.github/actions/live-host/action.yml): Ubuntu
-24.04, Node 26.12.1, OpenCode 2.2.7 (the latest host in the compatibility
-matrix; `compatibility.yml` covers 2.2.6 and 2.2.7), the runner's `tmux`, fd
-10.2.0, and `npm ci`. Every live job sets `ENSEMBLE_LIVE_REQUIRE=1`, writes
+24.04, Node 26.12.1, OpenCode 2.3.0 (the latest host in the compatibility
+matrix; `compatibility.yml` covers 2.2.6, 2.2.7, and 2.3.0), the runner's `tmux`, fd
+10.2.0, `npm ci`, and `npm run build` (the package exports load `dist/`, so a
+fresh checkout must build the runtime before a live suite starts a host).
+Every live job sets `ENSEMBLE_LIVE_REQUIRE=1`, writes
 redacted artifacts to `$RUNNER_TEMP/ensemble-live-artifacts`, and uploads them
 on failure. The preflight prints the resolved versions and fails if a required
 tool is missing or the pinned Node/OpenCode version differs.
@@ -216,21 +235,25 @@ without letting one job hang indefinitely.
 | Job | Suites | Timeout | Observed |
 | --- | --- | ---: | ---: |
 | `latency-reference` | `test:live:latency` (`reference` profile: 50 ms rail, 250 ms card) | 30 min | ~3 min |
+| `soak-smoke` | `npm run soak:smoke` (180 s observe-only record; the 4-hour gate is opt-in) | 20 min | ~4 min |
 | `real` | `test:live` with the real host catalog; opt-in via the `real` dispatch input or `ENSEMBLE_NIGHTLY_REAL=1` | 30 min | ~3 min |
 
 The schedule is `17 4 * * *`; `workflow_dispatch` allows a manual run. The
 real-model job is skipped unless opted in, so credentials and model cost stay
-controlled. Nightly wall-clock budget is 60 minutes with both jobs.
+controlled. Nightly wall-clock budget is 80 minutes with all jobs; the soak
+smoke record uploads even on success, and the full multi-hour gate remains a
+manual/opt-in run recorded in a verification record.
 
 ### Kept separate
 
-`compatibility.yml` runs the host probe and deterministic fake smoke on
-OpenCode 2.2.6 and 2.2.7; `node-matrix.yml` runs `npm run verify` on Node
-22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs `npm run docs:check`. The old
-`latency.yml` is removed: the smoke profile lives in `verify.yml` and the
-reference gate in `nightly.yml`. `src/v2/ci-workflows.ts` and its test assert
-this job graph, the suite ownership, the timeouts, the artifact uploads, the
-`ENSEMBLE_LIVE_REQUIRE=1` contract, and the OpenCode pin.
+`compatibility.yml` runs `npm ci`, `npm run build`, the host probe, and the
+deterministic fake smoke on OpenCode 2.2.6, 2.2.7, and 2.3.0; `node-matrix.yml` runs
+`npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs
+`npm run docs:check`. The old `latency.yml` is removed: the smoke profile lives
+in `verify.yml` and the reference gate in `nightly.yml`. `src/v2/ci-workflows.ts`
+and its test assert this job graph, the suite ownership, the timeouts, the
+artifact uploads, the `ENSEMBLE_LIVE_REQUIRE=1` contract, the runtime build
+after dependency install, and the OpenCode pin.
 
 ## Skip versus fail
 
@@ -351,6 +374,24 @@ the parent barrier and Work card. A one-shot init pre-stream pause keeps the
 indeterminate System Agent row observable, and a pre-stream turn pause keeps
 the transient `Asking $Name…` window observable on the narrower chat cell.
 
+## Soak and support bundle
+
+`npm run soak:smoke` is the short local/CI observation (180 s, observe-only).
+`npm run soak` is the default 4-hour enforced gate (nightly/opt-in). Both start
+an isolated fake host, create agents and one-directory-per-workspace fixtures,
+send real `message.send` work, and write `soak.jsonl` plus
+`soak-summary.json` under `ENSEMBLE_SOAK_OUT`. The record has counts, process
+RSS, store bytes, diagnostic payload size/latency, queue/native state, and
+log-sink counters only; titles, instructions, text, file bytes, and private
+paths never enter it. See
+[docs/operations/scale-and-monitoring.md](../docs/operations/scale-and-monitoring.md)
+for the gate, knobs, and the recorded envelope.
+
+`npm run support:bundle -- --out DIR` collects redacted local evidence:
+`doctor.json`, `logs-summary.json`, bounded warn/error/failure log rows, a log
+inventory, and the service descriptor with the password redacted. There is no
+upload. Review the files before attaching them to an issue.
+
 ## Size matrix
 
 `npm run test:live:sizes` (ticket #127, three-pane shell #166/#172/#173,
@@ -389,6 +430,25 @@ viewport-sensitive transcript assertions. Use the size matrix for other
 geometries; running the full scenario at a smaller height can fail because a
 finalized rich reply is not visible in the shorter pane, not because the Work
 layout is wrong.
+
+## Backup and restore
+
+`npm run backup` is the operator client for ticket #273's durable-state
+recovery path. It calls the running service's existing `ensemble.v2` RPC
+`invoke` method and resolves the same service descriptor as `doctor`:
+
+```sh
+npm run backup -- export --out ./ensemble-backup.json "$PWD"
+npm run backup -- status "$PWD"
+npm run backup -- restore --in ./ensemble-backup.json --confirm RESTORE "$PWD"
+npm run backup -- rollback --confirm ROLLBACK "$PWD"
+```
+
+`export` writes an owner-only (`0600`) file atomically and prints counts only.
+`restore` and `rollback` refuse while work is running and never print
+conversation content or credentials. The document contains conversation
+content: keep it private. The full procedure, format, and failure behavior are
+in [backup and restore](../docs/operations/backup-restore.md).
 
 ## Issue hygiene
 

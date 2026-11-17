@@ -27,7 +27,7 @@ env:
   # Keep aligned with SUPPORTED_OPENCODE_VERSIONS in
   # src/v2/host-compatibility.ts. The compatibility matrix covers 2.2.6 and
   # 2.2.7; the nightly reference host runs the latest tested host.
-  OPENCODE_VERSION: "2.2.7"
+  OPENCODE_VERSION: "2.3.0"
   FD_VERSION: "10.2.0"
 
 jobs:
@@ -63,6 +63,47 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: latency-reference-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  soak-smoke:
+    name: soak-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ENSEMBLE_LIVE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/live-host
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          opencode-version: ${{ env.OPENCODE_VERSION }}
+          fd-version: ${{ env.FD_VERSION }}
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:preflight
+      - name: Short soak observation
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+          ENSEMBLE_SOAK_OUT: ${{ runner.temp }}/ensemble-soak-smoke
+        run: npm run soak:smoke
+      - name: Upload soak record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-smoke-record
+          path: ${{ runner.temp }}/ensemble-soak-smoke
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-smoke-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
           if-no-files-found: ignore
           retention-days: 7

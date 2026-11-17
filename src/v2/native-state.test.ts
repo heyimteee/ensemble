@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { NATIVE_INBOX_ORDER_LIMIT, NativeIngestionState } from "./native-state.ts"
+import { NATIVE_INBOX_ORDER_LIMIT, NATIVE_SESSION_STATE_LIMIT, NativeIngestionState } from "./native-state.ts"
 import { nativeFinalText } from "./native-turn.ts"
 
 /**
@@ -299,4 +299,37 @@ test("ticket231 native state unit: sessions are isolated", () => {
   state.clear()
   assert.equal(state.peek("a"), undefined)
   assert.equal(state.peek("b"), undefined)
+})
+
+test("ticket276 native state unit: settled sessions cannot grow without bound", () => {
+  const state = new NativeIngestionState()
+  const total = NATIVE_SESSION_STATE_LIMIT + 25
+  for (let index = 0; index < total; index += 1) {
+    const sessionID = `s${index}`
+    state.enqueue(sessionID, { inboxID: `m${index}`, turn: true, pending: true })
+    state.start(sessionID, { owner: "turn", turnID: `t${index}` })
+    state.answer(sessionID, { turnID: `t${index}`, assistantID: `a${index}`, ordinal: 0, type: "ended", text: "answer" })
+    state.touchWatchdog(sessionID, `t${index}`, index)
+    state.settle(sessionID, { execution: true, turnID: `t${index}`, inboxID: `m${index}` })
+  }
+  assert.equal(state.sessionCount(), NATIVE_SESSION_STATE_LIMIT)
+  assert.equal(state.peek("s0"), undefined, "the oldest settled session is evicted")
+  assert.ok(state.peek(`s${total - 1}`), "the newest settled session is retained")
+})
+
+test("ticket276 native state unit: an active session is never evicted", () => {
+  const state = new NativeIngestionState()
+  for (let index = 0; index < NATIVE_SESSION_STATE_LIMIT; index += 1) {
+    state.enqueue(`idle${index}`, { inboxID: `m${index}`, turn: true, pending: true })
+    state.settle(`idle${index}`, { turnID: `t${index}`, inboxID: `m${index}` })
+  }
+  state.enqueue("active", { inboxID: "m-active", turn: true, pending: true })
+  state.start("active", { owner: "turn", turnID: "t-active" })
+  for (let index = NATIVE_SESSION_STATE_LIMIT; index < NATIVE_SESSION_STATE_LIMIT + 10; index += 1) {
+    state.enqueue(`more${index}`, { inboxID: `m${index}`, turn: true, pending: true })
+    state.settle(`more${index}`, { turnID: `t${index}`, inboxID: `m${index}` })
+  }
+  assert.ok(state.sessionCount() >= NATIVE_SESSION_STATE_LIMIT)
+  assert.ok(state.peek("active"), "a session holding a live execution stays")
+  assert.deepEqual(state.peek("active")?.executionTurns, ["t-active"])
 })

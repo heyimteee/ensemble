@@ -8,10 +8,12 @@ import {
   NIGHTLY_JOB_BUDGET_MINUTES,
   PR_JOB_BUDGET_MINUTES,
   PR_LIVE_SUITES,
+  REQUIRED_STATUS_CHECKS,
   checkCiRepository,
   checkCompatibilityWorkflow,
   checkLiveHostAction,
   checkNightlyWorkflow,
+  checkReleaseWorkflow,
   checkVerifyWorkflow,
   workflowJobs,
 } from "./ci-workflows.ts"
@@ -22,6 +24,7 @@ const supported = [...SUPPORTED_OPENCODE_VERSIONS]
 const latest = supported[supported.length - 1]!
 const verifyWorkflowPath = ".github/workflows/verify.yml"
 const nightlyWorkflowPath = ".github/workflows/nightly.yml"
+const releaseWorkflowPath = ".github/workflows/release.yml"
 const liveHostActionPath = ".github/actions/live-host/action.yml"
 
 function read(path: string): string {
@@ -33,6 +36,18 @@ function removeLine(text: string, needle: string): string {
   const index = lines.findIndex((line) => line.includes(needle))
   assert.notEqual(index, -1, `fixture must contain ${JSON.stringify(needle)}`)
   lines.splice(index, 1)
+  return lines.join("\n")
+}
+
+/** Drop a whole `- name: ...` step so the fixture stays valid YAML. */
+function removeStep(text: string, name: string, indent = "    "): string {
+  const lines = text.split("\n")
+  const prefix = `${indent}- `
+  const index = lines.findIndex((line) => line.startsWith(prefix) && line.includes(name))
+  assert.notEqual(index, -1, `fixture must contain a step named ${JSON.stringify(name)}`)
+  let end = index + 1
+  while (end < lines.length && !lines[end]!.startsWith(prefix)) end += 1
+  lines.splice(index, end - index)
   return lines.join("\n")
 }
 
@@ -123,7 +138,7 @@ test("the nightly job graph gates latency on the reference profile and keeps the
   assert.deepEqual(checkNightlyWorkflow(text, supported), [])
   assert.deepEqual(
     [...workflowJobs(text).keys()].sort(),
-    ["latency-reference", "real"],
+    ["latency-reference", "real", "soak-smoke"],
   )
   for (const [job, budget] of Object.entries(NIGHTLY_JOB_BUDGET_MINUTES)) {
     assert.ok(job in NIGHTLY_JOB_BUDGET_MINUTES, `${job} has a budget`)
@@ -172,6 +187,36 @@ test("the live host action pins every tool through its inputs", () => {
   assert.deepEqual(checkLiveHostAction(text), [])
 })
 
+test("a live host action that installs dependencies without building the runtime is rejected", () => {
+  const text = read(liveHostActionPath)
+  assert.match(text, /npm run build/, "the live host action builds the runtime")
+
+  const withoutBuild = removeStep(text, "Build runtime")
+  assert.ok(failuresMatching(checkLiveHostAction(withoutBuild), /npm run build/).length > 0)
+
+  // The package exports load dist/, so the build has to survive the install.
+  const beforeInstall = removeStep(text, "Build runtime").replace(
+    "    - name: Install npm dependencies",
+    "    - name: Build runtime\n      shell: bash\n      run: npm run build\n    - name: Install npm dependencies",
+  )
+  assert.ok(failuresMatching(checkLiveHostAction(beforeInstall), /npm run build/).length > 0)
+})
+
+test("a compatibility job that probes or fakes the host without a dist build is rejected", () => {
+  const text = read(".github/workflows/compatibility.yml")
+  assert.match(text, /npm run build/, "the compatibility job builds the runtime")
+
+  const withoutBuild = removeStep(text, "Build runtime", "      ")
+  assert.ok(failuresMatching(checkCompatibilityWorkflow(withoutBuild, supported), /npm run build/).length > 0)
+
+  // A build after the fake smoke is too late: the host already loaded the plugin.
+  const afterSuites = removeStep(text, "Build runtime", "      ").replace(
+    "      - name: Upload sanitized host contract record",
+    "      - name: Build runtime\n        run: npm run build\n      - name: Upload sanitized host contract record",
+  )
+  assert.ok(failuresMatching(checkCompatibilityWorkflow(afterSuites, supported), /npm run build/).length > 0)
+})
+
 test("a hardcoded host version in the live host action is rejected", () => {
   const text = read(liveHostActionPath).replace(
     "OPENCODE_VERSION: ${{ inputs.opencode-version }}",
@@ -184,4 +229,115 @@ test("a hardcoded host version in the live host action is rejected", () => {
 test("the repository keeps the compatibility, Node, and docs workflows and drops the duplicate latency workflow", () => {
   assert.deepEqual(checkCiRepository(repoRoot, supported), [])
   assert.equal(existsSync(join(repoRoot, ".github/workflows/latency.yml")), false)
+})
+
+test("the release workflow is tag-driven and dry-runs a manual dispatch", () => {
+  const text = read(releaseWorkflowPath)
+  assert.deepEqual(checkReleaseWorkflow(text), [])
+  assert.deepEqual(
+    [...workflowJobs(text).keys()].sort(),
+    ["github-release", "package", "preflight", "publish", "publish-dry-run"],
+  )
+
+  const noDispatch = text.replace("  workflow_dispatch:\n", "")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noDispatch), /workflow_dispatch/).length > 0)
+})
+
+test("a release workflow that can run on a branch push or pull request is rejected", () => {
+  const text = read(releaseWorkflowPath)
+
+  const withPullRequest = text.replace("on:\n", "on:\n  pull_request:\n")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withPullRequest), /pull_request/).length > 0)
+
+  const withBranch = text.replace('      - "v*"', '      - "v*"\n    branches:\n      - main')
+  assert.ok(failuresMatching(checkReleaseWorkflow(withBranch), /tag|branch/).length > 0)
+
+  const barePush = text.replace('  push:\n    tags:\n      - "v*"\n', "  push:\n")
+  assert.ok(failuresMatching(checkReleaseWorkflow(barePush), /tag/).length > 0)
+})
+
+test("a real publish needs the tag ref, provenance, the npm token secret, and OIDC", () => {
+  const text = read(releaseWorkflowPath)
+
+  const withoutProvenance = text.replace(
+    "npm publish --provenance --access public",
+    "npm publish --access public",
+  )
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutProvenance), /provenance/).length > 0)
+
+  const withoutToken = removeLine(text, "NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutToken), /NPM_TOKEN/).length > 0)
+
+  const withoutOidc = removeLine(text, "id-token: write")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutOidc), /id-token/).length > 0)
+
+  const branchPublish = text.replace(
+    "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+    "    if: github.ref == 'refs/heads/main'",
+  )
+  assert.ok(failuresMatching(checkReleaseWorkflow(branchPublish), /tag/).length > 0)
+})
+
+test("the dry run publishes without a token and never performs a real publish", () => {
+  const text = read(releaseWorkflowPath)
+
+  const realPublish = text.replace(
+    "npm publish --dry-run --access public",
+    "npm publish --access public",
+  )
+  assert.ok(failuresMatching(checkReleaseWorkflow(realPublish), /dry-run/).length > 0)
+
+  const dryRunJob = workflowJobs(text).get("publish-dry-run")!
+  assert.doesNotMatch(dryRunJob, /secrets\./, "the dry run must not need a secret")
+
+  const withoutDistTag = text.replace(' --tag "$DIST_TAG"', "")
+  assert.ok(failuresMatching(checkReleaseWorkflow(withoutDistTag), /dist-tag/).length > 0)
+})
+
+test("the release produces an SBOM and publishes the notes on the GitHub release", () => {
+  const text = read(releaseWorkflowPath)
+
+  const noSbom = removeLine(text, "npm sbom --sbom-format=cyclonedx")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noSbom), /SBOM|sbom/).length > 0)
+
+  const noNotes = removeLine(text, "--notes-file")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noNotes), /notes/).length > 0)
+
+  const noRelease = removeLine(text, "gh release create")
+  assert.ok(failuresMatching(checkReleaseWorkflow(noRelease), /GitHub release/).length > 0)
+})
+
+test("the required main checks are exactly the workflow job names", () => {
+  const expected = new Set<string>([
+    ...["verify", "live-fake", "live-native", "live-multilocation", "latency-smoke"],
+    "docs:check",
+  ])
+  for (const node of [...read(".github/workflows/node-matrix.yml").matchAll(/^\s+- "(\d+\.\d+\.\d+)"$/gm)]) {
+    expected.add(`verify (Node ${node[1]})`)
+  }
+  for (const host of supported) expected.add(`OpenCode ${host}`)
+
+  assert.deepEqual([...REQUIRED_STATUS_CHECKS].sort(), [...expected].sort())
+
+  const verifyNames = [...workflowJobs(read(verifyWorkflowPath)).values()].map(
+    (block) => /^ {4}name:\s*(.+)$/m.exec(block)?.[1],
+  )
+  for (const name of ["verify", "live-fake", "live-native", "live-multilocation", "latency-smoke"]) {
+    assert.ok(verifyNames.includes(name), `${name} is a real verify.yml job name`)
+  }
+  assert.match(read(".github/workflows/docs.yml"), /^ {4}name: docs:check$/m)
+  assert.match(read(".github/workflows/node-matrix.yml"), /^ {4}name: verify \(Node \$\{\{ matrix\.node \}\}\)$/m)
+  assert.match(
+    read(".github/workflows/compatibility.yml"),
+    /^ {4}name: OpenCode \$\{\{ matrix\.opencode \}\}$/m,
+  )
+})
+
+test("the operations docs record every required check and the applied protection", () => {
+  const doc = read("docs/operations/release.md")
+  for (const context of REQUIRED_STATUS_CHECKS) {
+    assert.ok(doc.includes(context), `docs/operations/release.md must list ${context}`)
+  }
+  assert.match(doc, /require.*review|required_approving_review_count/i)
+  assert.match(doc, /ruleset|branch protection/i)
 })

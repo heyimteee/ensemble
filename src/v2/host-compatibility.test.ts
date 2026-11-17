@@ -26,11 +26,13 @@ test("host versions are normalized without accepting unrelated text", () => {
 })
 
 test("only the tested OpenCode CLI releases are supported", () => {
-  assert.deepEqual([...SUPPORTED_OPENCODE_VERSIONS], ["2.2.6", "2.2.7"])
+  assert.deepEqual([...SUPPORTED_OPENCODE_VERSIONS], ["2.2.6", "2.2.7", "2.3.0"])
   assert.equal(hostVersionSupported("2.2.6"), true)
   assert.equal(hostVersionSupported("opencode v2.2.7"), true)
+  assert.equal(hostVersionSupported("2.3.0"), true)
   assert.equal(hostVersionSupported("2.2.5"), false)
   assert.equal(hostVersionSupported("2.2.8"), false)
+  assert.equal(hostVersionSupported("2.3.1"), false)
   assert.equal(hostVersionSupported(undefined), false)
 })
 
@@ -40,8 +42,16 @@ test("the peer range covers every tested host API and matches package.json", () 
     assert.match(OPENCODE_PLUGIN_PEER_RANGE, new RegExp(`(^|\\|\\| )${version.replaceAll(".", "\\.")}($| \\|\\|)`))
     assert.equal(OPENCODE_PLUGIN_VERSION_BY_HOST[version], version)
   }
-  for (const peer of ["@opencode/plugin", "@opentui/core", "@opentui/solid", "solid-js"]) {
-    assert.equal(packageJson.peerDependenciesMeta?.[peer]?.optional, true, `${peer} stays an optional peer`)
+  assert.equal(packageJson.peerDependenciesMeta?.["@opencode/plugin"]?.optional, true)
+})
+
+test("the TUI runtime packages ship as dependencies, not host peers", () => {
+  // Ticket #279: the installed TUI must resolve @opentui/core, @opentui/solid,
+  // and solid-js from the plugin cache; only @opencode/plugin is host-supplied.
+  assert.deepEqual(Object.keys(packageJson.peerDependencies ?? {}), ["@opencode/plugin"])
+  for (const dependency of ["@opentui/core", "@opentui/solid", "solid-js"]) {
+    assert.equal(typeof packageJson.dependencies?.[dependency], "string", `${dependency} is a runtime dependency`)
+    assert.equal(packageJson.devDependencies?.[dependency], undefined, `${dependency} is not dev-only`)
   }
 })
 
@@ -61,12 +71,12 @@ test("an unsupported host produces one clear warning", () => {
   assert.equal(messages.length, 1)
   assert.equal(warning, messages[0])
   assert.match(warning ?? "", /OpenCode 2\.2\.5 is not supported/)
-  assert.match(warning ?? "", /2\.2\.6 and 2\.2\.7/)
-  assert.match(warning ?? "", /@opencode\/plugin 2\.2\.6 \|\| 2\.2\.7/)
+  assert.match(warning ?? "", /2\.2\.6, 2\.2\.7, and 2\.3\.0/)
+  assert.match(warning ?? "", /@opencode\/plugin 2\.2\.6 \|\| 2\.2\.7 \|\| 2\.3\.0/)
 })
 
 test("a supported or unknown host produces no warning", () => {
-  for (const ctx of [{ app: { version: "2.2.6" } }, { app: { version: "v2.2.7" } }, { app: {} }, {}]) {
+  for (const ctx of [{ app: { version: "2.2.6" } }, { app: { version: "v2.2.7" } }, { app: { version: "2.3.0" } }, { app: {} }, {}]) {
     const messages: string[] = []
     const warning = warnUnsupportedHost(ctx, (message) => messages.push(message))
     assert.equal(warning, undefined)

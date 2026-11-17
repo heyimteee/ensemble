@@ -21,6 +21,12 @@ coverage/
 *.db
 *.db-*
 
+# Release artifacts (docs/operations/release.md)
+RELEASE_NOTES.md
+pack-report.json
+*.tgz
+*.cdx.json
+
 # Editor and operating-system files
 .idea/
 .vscode/

@@ -8,6 +8,7 @@ import {
   WCAG_AA_UI,
   contrastRatio,
   contrastText,
+  isDefaultColor,
   meetsContrast,
   palette,
   workCardBorderColor,
@@ -45,18 +46,23 @@ function themeWithBackground(base: string): any {
   }
 }
 
+function paletteWith(theme: any, mode?: "dark" | "light"): Palette {
+  // Ticket #282: keep the palette matrix independent of an ambient NO_COLOR.
+  return palette(theme, mode, {})
+}
+
 test("ticket137: the pale-blue identity token works on dark and light themes", () => {
-  const dark = palette(themeWithBackground("#101010"))
-  const light = palette(themeWithBackground("#fafafa"))
+  const dark = paletteWith(themeWithBackground("#101010"))
+  const light = paletteWith(themeWithBackground("#fafafa"))
   assert.equal(dark.paleBlue, "#a8c7fa")
   assert.equal(light.paleBlue, "#3b6ea5")
   assert.notEqual(dark.paleBlue, light.paleBlue)
-  assert.equal(palette(themeWithBackground("#101010"), "light").paleBlue, light.paleBlue, "the host theme mode wins")
-  assert.equal(palette(themeWithBackground("#fafafa"), "dark").paleBlue, dark.paleBlue, "the host theme mode wins")
+  assert.equal(paletteWith(themeWithBackground("#101010"), "light").paleBlue, light.paleBlue, "the host theme mode wins")
+  assert.equal(paletteWith(themeWithBackground("#fafafa"), "dark").paleBlue, dark.paleBlue, "the host theme mode wins")
 })
 
 test("ticket173: focused Work cards are white and unfocused cards are grey", () => {
-  const dark = palette(themeWithBackground("#101010"))
+  const dark = paletteWith(themeWithBackground("#101010"))
   assert.equal(dark.cardFocus, "#ffffff", "the default theme's card focus border is white")
   assert.equal(dark.border, "#6a6a6a", "unfocused cards keep the subdued border grey")
   assert.notEqual(dark.cardFocus, dark.border)
@@ -70,11 +76,11 @@ test("ticket173: card focus is the highest-contrast tone, not the host action fi
   // high-contrast focus tone on both sides of the theme mode.
   const darkTheme = themeWithBackground("#101010")
   darkTheme.text.action.primary.focused = "#080808"
-  const dark = palette(darkTheme)
+  const dark = paletteWith(darkTheme)
   assert.equal(dark.cardFocus, "#ffffff", "a dark host surface keeps the white focus border")
   const lightTheme = themeWithBackground("#fafafa")
   lightTheme.text.action.primary.focused = "#080808"
-  const light = palette(lightTheme)
+  const light = paletteWith(lightTheme)
   assert.equal(light.cardFocus, "#000000", "a light host surface uses the highest-contrast dark tone")
   assert.equal(workCardBorderColor(light, false), "#767676", "unfocused cards keep the grey border")
 })
@@ -224,7 +230,7 @@ test("ticket259: WCAG AA text and UI thresholds are applied separately", () => {
 
 test("ticket259: every text role meets 4.5:1 on every matrix surface", () => {
   for (const row of PALETTE_MATRIX) {
-    const colors = palette(row.theme, row.mode)
+    const colors = palette(row.theme, row.mode, {})
     for (const background of ["panel", "bg"] as const) {
       for (const role of PALETTE_TEXT_ROLES) {
         const ratio = contrastRatio(colors[role], colors[background])
@@ -239,7 +245,7 @@ test("ticket259: every text role meets 4.5:1 on every matrix surface", () => {
 
 test("ticket259: every UI role meets 3:1 on the card surface", () => {
   for (const row of PALETTE_MATRIX) {
-    const colors = palette(row.theme, row.mode)
+    const colors = palette(row.theme, row.mode, {})
     for (const role of PALETTE_UI_ROLES) {
       const ratio = contrastRatio(colors[role], colors.panel)
       assert.ok(
@@ -252,15 +258,55 @@ test("ticket259: every UI role meets 3:1 on the card surface", () => {
 
 test("ticket259: every palette color role is classified by the contrast matrix", () => {
   const classified = new Set<string>([...PALETTE_TEXT_ROLES, ...PALETTE_UI_ROLES, "panel", "bg", "categorical"])
-  const colors: Palette = palette(PALETTE_MATRIX[0].theme, PALETTE_MATRIX[0].mode)
+  const colors: Palette = palette(PALETTE_MATRIX[0].theme, PALETTE_MATRIX[0].mode, {})
   for (const role of Object.keys(colors)) {
     assert.ok(classified.has(role), `${role} must be a text role, a UI role, or an explicit surface/data role`)
   }
 })
 
+test("ticket282: NO_COLOR resolves every palette role to the terminal default", () => {
+  const theme = themeWithBackground("#101010")
+  const colored = palette(theme, "dark", {})
+  assert.equal(colored.text, "#e6e6e6", "without NO_COLOR the host palette is unchanged")
+  assert.equal(colored.good, "#4ea35a", "without NO_COLOR the semantic tones are unchanged")
+  assert.equal(colored.border, "#6a6a6a", "without NO_COLOR the border role is unchanged")
+  assert.equal(colored.cardFocus, "#ffffff", "without NO_COLOR the focus border is unchanged")
+
+  const monochrome = palette(theme, "dark", { NO_COLOR: "" })
+  for (const role of PALETTE_TEXT_ROLES) {
+    const value = monochrome[role]
+    assert.ok(value instanceof RGBA, `${role} must be a color input`)
+    assert.equal(value.intent, "default", `${role} must resolve to the terminal default foreground`)
+  }
+  for (const role of PALETTE_UI_ROLES) {
+    const value = monochrome[role]
+    assert.ok(value instanceof RGBA, `${role} must be a color input`)
+    assert.equal(value.intent, "default", `${role} must resolve to the terminal default foreground`)
+  }
+  for (const role of ["panel", "bg"] as const) {
+    const value = monochrome[role]
+    assert.ok(value instanceof RGBA, `${role} must be a color input`)
+    assert.ok(value.equals(RGBA.defaultBackground()), `${role} must resolve to the terminal default background`)
+  }
+  assert.deepEqual(monochrome.categorical, [], "categorical data colors are suppressed under NO_COLOR")
+
+  const present = palette(theme, "dark", { NO_COLOR: "1" })
+  assert.ok(present.text instanceof RGBA)
+  assert.ok(monochrome.text instanceof RGBA)
+  assert.ok(present.text.equals(monochrome.text), "any NO_COLOR value, including a non-empty one, suppresses color")
+})
+
+test("ticket282: the default color intent is distinguishable from a concrete RGB value", () => {
+  assert.equal(isDefaultColor(RGBA.defaultForeground()), true)
+  assert.equal(isDefaultColor(RGBA.defaultBackground()), true)
+  assert.equal(isDefaultColor(RGBA.fromHex("#ffffff")), false)
+  assert.equal(isDefaultColor("#ffffff"), false)
+  assert.equal(isDefaultColor(undefined), false)
+})
+
 test("ticket259: automatic chip text keeps readable contrast on every matrix surface", () => {
   for (const row of PALETTE_MATRIX) {
-    const colors = palette(row.theme, row.mode)
+    const colors = palette(row.theme, row.mode, {})
     const chipText = contrastText(colors.panel)
     const ratio = contrastRatio(chipText, colors.panel)
     assert.ok(ratio !== null && ratio >= WCAG_AA_TEXT, `${row.name}: chip text is ${ratio?.toFixed(2) ?? "unknown"}:1`)

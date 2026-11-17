@@ -43,7 +43,7 @@ import {
   type RailEmphasis,
   type RailPulseStart,
 } from "./rail.ts"
-import { palette } from "./theme.ts"
+import { isNoColor, palette } from "./theme.ts"
 import {
   buildRailModel,
   clampRailCursor,
@@ -182,7 +182,7 @@ import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { scopesToResync } from "../scoped-read.ts"
 import { approvalResolutionAt } from "../work-groups.ts"
-import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { configMetadataApplies, advanceScopedCursor, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotFetch, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, reconnectRequiresReplacement, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createFeedGapReporter } from "./feed-gaps.ts"
 import { createClientStore } from "./client-store.ts"
 import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"
@@ -440,7 +440,17 @@ export function EnsembleV2App() {
     if (tuiLogger === logger) tuiLogger = undefined
   })
   // Ticket #137: the host theme mode selects the readable pale-blue identity pair.
-  const colors = palette(context.theme as any, context.themeMode)
+  // Ticket #282: NO_COLOR resolves every role to terminal defaults at this seam.
+  const colors = palette(context.theme as any, context.themeMode, process.env)
+  // Ticket #284: OpenTUI's scrollbox paints its thumb/track with a concrete
+  // default palette, and text fields fall back to a host placeholder color.
+  // Under `NO_COLOR` both resolve to the monochrome roles; without it the
+  // renderer/host defaults are untouched.
+  const colorSuppressed = isNoColor(process.env)
+  const transcriptScrollbarOptions = colorSuppressed
+    ? { trackOptions: { foregroundColor: colors.faint, backgroundColor: colors.panel } }
+    : undefined
+  const monochromePlaceholder = colorSuppressed ? { placeholderColor: colors.faint } : {}
   // Ticket #119: the host toast is only a fallback for feedback that cannot be
   // painted by the mounted Ensemble surface (setup failure, or an async
   // completion while the native route is visible). Everything else renders in
@@ -450,7 +460,7 @@ export function EnsembleV2App() {
   }
   const syntaxStyle = (() => {
     try {
-      return SyntaxStyle.fromStyles(markdownStyles(context.theme), (context.renderer as any).nativeScene)
+      return SyntaxStyle.fromStyles(markdownStyles(context.theme, process.env), (context.renderer as any).nativeScene)
     } catch (error) {
       console.error("ensemble: markdown styling unavailable", error)
       showHostToast({ title: "Ensemble", message: "Rich Markdown styling unavailable; using plain text.", tone: "warning" })
@@ -1877,7 +1887,7 @@ export function EnsembleV2App() {
   // relays all resolve through unifiedAuthorColor (ID first, roster-name
   // fallback), so each agent reads as the same color everywhere.
   const authorColor = (input: { agentID?: string; author: string; role: "user" | "agent" | "system" }) =>
-    unifiedAuthorColor(input, state()?.agents ?? {}, rosterAgents(), colors, colors.categorical)
+    unifiedAuthorColor(input, state()?.agents ?? {}, rosterAgents(), colors, colors.categorical, process.env)
   const hasChatContent = createMemo(
     () =>
       finalizedLines().length > 0 ||
@@ -2629,9 +2639,15 @@ export function EnsembleV2App() {
     // A feed reset or epoch change forces a real replacement even when the
     // restarted store reports a version the client has not seen before.
     const forced = forceSnapshotReplace
-    forceSnapshotReplace = false
-    const apply = forced ? "replace" : decideSnapshotApply(lastSnapshotMeta, nextMeta)
+    const apply = decideSnapshotFetch(lastSnapshotMeta, nextMeta, forced)
     if (apply === "skip") return
+    // A same-epoch patch moved the cursor during this forced read. Keeping
+    // the forced bit turns the queued pass into the replacement.
+    if (apply === "refetch") {
+      snapshotRefresh.request()
+      return
+    }
+    forceSnapshotReplace = false
     lastSnapshotMeta = nextMeta
     if (apply === "replace") client.applySnapshot(next)
     else client.applyMetadata(next)
@@ -2671,6 +2687,10 @@ export function EnsembleV2App() {
     // A patch may have advanced the cursor while the resync was in flight.
     // Never rewind entity state to an older durable version.
     if (lastSnapshotMeta && result.epoch === lastSnapshotMeta.epoch && result.version < lastSnapshotMeta.version) return
+    // Ticket #283: only a same-epoch resync can advance the cursor. A
+    // foreign epoch names just the scopes it read, so Work or the shell may
+    // still be the old store generation; never mark them current.
+    const cursor = advanceScopedCursor(lastSnapshotMeta, result.epoch, result.version)
     batch(() => {
       if (result.shell) client.applyShellSnapshot(result.shell)
       if (result.work) client.applyWorkProjection(result.work, result.version, result.dispatchGroups)
@@ -2679,8 +2699,14 @@ export function EnsembleV2App() {
       if (window && target) client.applyTranscriptWindow(target, window, "replace")
       client.applyCounts(result.counts)
       if (result.meta) client.applyChanges([], undefined, result.meta, result.counts)
-      if (lastSnapshotMeta) lastSnapshotMeta = { ...lastSnapshotMeta, version: result.version, epoch: result.epoch }
+      if (cursor) lastSnapshotMeta = cursor
     })
+    if (lastSnapshotMeta && !cursor) {
+      // The scoped read applied what it carried; the full boundary must
+      // rebuild the scopes it did not, from the restarted durable store.
+      forceSnapshotReplace = true
+      snapshotRefresh.request()
+    }
     syncScopedSelection()
     repaintFromFeed()
   }
@@ -5430,7 +5456,19 @@ export function EnsembleV2App() {
       if (type === "server.connected") {
         // Ticket #224: a restarted service restarts the picker revision.
         lastSessionPickerRevision = undefined
-        void checkRevision(true)
+        // Ticket #283: a loaded client cannot prove its cursor survived the
+        // service restart. Drop ephemeral text and replace the whole durable
+        // snapshot even if a heartbeat is in flight or a scoped read already
+        // touched one scope. A cold client keeps the cheap bootstrap path.
+        if (reconnectRequiresReplacement(lastSnapshotMeta)) {
+          groupStream.clear()
+          dmStream.clear()
+          setLiveDm(null)
+          setWorkActivities(new Map())
+          void refreshFull()
+        } else {
+          void checkRevision(true)
+        }
         return
       }
       // Ticket #224: the service emits one id-only refresh signal per claimed
@@ -7424,7 +7462,7 @@ export function EnsembleV2App() {
                         </box>
                       }>
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
-                          <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
+                          <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} scrollbarOptions={transcriptScrollbarOptions} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
                               <box flexDirection="column" width="100%" paddingRight={1}>
                                 <For each={mergedRows()}>{(row) => {
                                   // Ticket #67 muted inline completions: one
@@ -7575,7 +7613,7 @@ export function EnsembleV2App() {
                         </box>
                       </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={composerBorderColor()} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onPaste={handleComposerPaste} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea {...monochromePlaceholder} ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onPaste={handleComposerPaste} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>
@@ -7841,7 +7879,7 @@ export function EnsembleV2App() {
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
             <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
             <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-              <textarea ref={(value: any) => { textPromptRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+              <textarea {...monochromePlaceholder} ref={(value: any) => { textPromptRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
             <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{interaction().mode === "visual" ? visualHint : statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))}</text>
             </box>
@@ -7908,7 +7946,7 @@ export function EnsembleV2App() {
               }>
                 <Show when={wizardStepKey()} keyed>
                   <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                    <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                    <textarea {...monochromePlaceholder} ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                   </box>
                 </Show>
               </Show>
@@ -7933,7 +7971,7 @@ export function EnsembleV2App() {
               </box>
               <Show when={wizard()!.memoryEditor}>
                 <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                  <input ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
+                  <input {...monochromePlaceholder} ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
                 </box>
               </Show>
             </Show>

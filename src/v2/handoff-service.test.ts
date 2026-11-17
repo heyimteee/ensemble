@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
@@ -257,6 +257,34 @@ test("malformed, unknown, and missing-recipient handoffs are refused visibly", a
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a handoff path cannot escape .ensemble/handoffs/ through a symlink", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const outside = mkdtempSync(join(tmpdir(), "ensemble-handoff-outside-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    const secret = join(outside, "secret.md")
+    writeFileSync(secret, "---\nensemble: handoff\ntask: Leak the secret\n---\n# Handoff\n")
+    symlinkSync(secret, join(directory, ".ensemble", "handoffs", "link.md"))
+    const attempted = await tools.get("handoff").execute(
+      { maxHops: 1, task: "Leak the secret", summary: "", path: ".ensemble/handoffs/link.md", to: "Sage" },
+      { sessionID },
+    )
+    assert.match(attempted.content, /must be inside \.ensemble\/handoffs\//)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
   }
 })
 

@@ -1,0 +1,155 @@
+name: Release
+
+# Ticket #275: a version tag is the only trigger that can publish. The manual
+# dispatch always runs as a dry run: verify, docs:check, build, pack, and
+# `npm publish --dry-run` with no registry secret. The real publish adds
+# provenance through OIDC and the NPM_TOKEN secret, then creates the GitHub
+# release from the changelog notes and the CycloneDX SBOM. A plain branch push
+# cannot reach the publish jobs.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "26.12.1"
+
+jobs:
+  preflight:
+    name: release-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.mode.outputs.version }}
+      tag: ${{ steps.mode.outputs.tag }}
+      dry-run: ${{ steps.mode.outputs.dry-run }}
+      dist-tag: ${{ steps.mode.outputs.dist-tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Validate the tag and extract the release notes
+        id: mode
+        run: node --experimental-strip-types scripts/release-guard.mjs --manifest package.json --changelog CHANGELOG.md --out RELEASE_NOTES.md
+      - name: Upload the release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          retention-days: 7
+
+  package:
+    name: package
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+      - run: npm run docs:check
+      - run: npm run build
+      - name: Pack the release artifact
+        run: npm pack --json > pack-report.json
+      - name: Produce the CycloneDX SBOM
+        run: npm sbom --sbom-format=cyclonedx --package-lock-only > "ensemble-${VERSION}.cdx.json"
+      - name: Upload the package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: |
+            *.tgz
+            ensemble-*.cdx.json
+            pack-report.json
+          retention-days: 7
+
+  publish-dry-run:
+    name: publish-dry-run
+    needs: [preflight, package]
+    if: needs.preflight.outputs.dry-run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DIST_TAG: ${{ needs.preflight.outputs.dist-tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Publish the dry run without a registry token
+        run: npm publish --dry-run --access public --tag "$DIST_TAG"
+
+  publish:
+    name: publish
+    needs: [preflight, package]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DIST_TAG: ${{ needs.preflight.outputs.dist-tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - name: Publish with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public --tag "$DIST_TAG"
+
+  github-release:
+    name: github-release
+    needs: [preflight, publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: artifacts
+      - name: Create the GitHub release from the changelog notes
+        run: |
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "Ensemble $TAG" \
+            --notes-file artifacts/RELEASE_NOTES.md \
+            "artifacts/ensemble-${VERSION}.cdx.json" \
+            artifacts/*.tgz \
+            artifacts/RELEASE_NOTES.md \
+            CHANGELOG.md
