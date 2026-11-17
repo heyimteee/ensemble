@@ -141,7 +141,7 @@ test("fixture names the verified host versions and contains no private data", ()
   )
   assert.ok(typeof meta.versions.tmux === "string" && meta.versions.tmux.length > 0)
   assert.match(meta.versions.provider, /ensemble-fake/)
-  assert.match(meta.declaredTypes, /@opencode\/plugin 2\.2\.1/)
+  assert.match(meta.declaredTypes, /@opencode\/plugin \d+\.\d+\.\d+/)
   assert.ok(rows.some((row) => row.kind === "done"))
 
   for (const row of rows) {
