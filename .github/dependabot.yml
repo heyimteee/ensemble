@@ -39,14 +39,6 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    ignore:
-      # @opentui/solid 0.7.0 pins its peer to solid-js 1.9.12. A version update
-      # cannot satisfy that peer range; the pair moves together with the
-      # OpenCode/OpenTUI host. See docs/security/accepted-risks.md AR-271-01.
-      - dependency-name: "solid-js"
-        update-types:
-          - "version-update:semver-minor"
-          - "version-update:semver-patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"

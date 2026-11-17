@@ -357,7 +357,7 @@ commands.
 | F4 | User-selected attachment paths may be outside the workspace | Low | Accepted behavior; explicit user action |
 | F5 | `private_transcript` share is persisted as a global memory after approval | Low | Accepted for now; #272 must state the effect in the consent copy or make it transient |
 | F6 | Pattern-based log redaction can miss unusual secret shapes | Low | Accepted; content logging is opt-in and local |
-| D1 | 28 dev/peer dependency advisories (3 critical) | See `accepted-risks.md` | Accepted, `AR-271-01`/`AR-271-04`; `npm audit --omit=dev` is clean |
+| D1 | 24 dev/peer dependency advisories (0 critical) | See `accepted-risks.md` | `AR-271-01` resolved by #296; `AR-271-04` accepted; `npm audit --omit=dev` is clean |
 
 ## Out of scope
 

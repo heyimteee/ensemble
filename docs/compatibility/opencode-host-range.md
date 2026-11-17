@@ -28,7 +28,7 @@ The canonical constants live in
 
 `@opencode/plugin` stays an **optional** peer, as do `@opentui/core`,
 `@opentui/solid`, and `solid-js`; OpenCode supplies them at runtime. The
-repository still installs `@opencode/plugin` 2.2.1 for type checking. That is
+repository still installs `@opencode/plugin` 2.3.0 for type checking. That is
 the declaration baseline Ensemble compiles against, not a runtime support
 claim.
 

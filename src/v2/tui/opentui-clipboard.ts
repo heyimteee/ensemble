@@ -1,15 +1,15 @@
 /**
  * Typed compatibility shim for OpenTUI's clipboard service.
  *
- * Verified runtime: `@opentui/core` 0.7.0 (the version in package.json and
+ * Verified runtime: `@opentui/core` 0.8.4 (the version in package.json and
  * the pinned host plugin). In that release `index.d.ts` re-exports
  * `lib/clipboard.js` through `lib/index.js`, and `index.node.js` exports
  * `createHostClipboard`, `createClipboard`, and `createRendererClipboardAdapter`
  * at runtime. We import those typed names directly; no local `as` cast hides
  * the API.
  *
- * The peer range is `>=0.7.0`, so an older host build may not expose the
- * exports. The capability guard below returns null in that case and the Vim
+ * The verified peer range is `>=0.8.4`, so an older host build may not expose
+ * the exports. The capability guard below returns null in that case and the Vim
  * controller falls back to its in-memory register (writes report failure,
  * reads miss). Callers therefore treat a null service as "system clipboard
  * unavailable", not as a fatal error.
@@ -18,7 +18,7 @@
 import * as core from "@opentui/core"
 import type { ClipboardService, RendererClipboardBoundary } from "@opentui/core"
 
-export const VERIFIED_OPENTUI_CLIPBOARD_VERSION = "0.7.0"
+export const VERIFIED_OPENTUI_CLIPBOARD_VERSION = "0.8.4"
 
 export type RuntimeClipboardOptions = {
   /** Host clipboard operation timeout in milliseconds. */

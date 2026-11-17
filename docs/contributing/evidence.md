@@ -32,6 +32,7 @@ its tickets.
 
 ## Verification records
 
+- [OpenTUI 0.8 / Solid 1.9 TUI stack upgrade](../verification/2026-11-17-ticket-296.md): coordinated runtime bump, Node 22/26 installs, verify, fake E2E, size matrix, pack contents, and the macOS render check
 - [Public release readiness — parent #268](../verification/2026-11-17-ticket-268.md): the released `0.1.0-rc.2` state, every child ticket result including #277 macOS verification and #281–#287, the final-tip install/fake/soak evidence, green required CI at `a7f1eb3`, the full macOS checklist including 1.7, the public-registry smoke on 2.2.7/2.3.0, npm `latest`/`next` behavior, and the remaining announcement decision
 - [Live TUI readiness after opening Ensemble](../verification/2026-11-17-ticket-287.md): statusline-gated `live_open_ensemble`, a header-only guard test, the deterministic command-line retype ordering, and passing 2.3.0/2.2.7 fake suites
 - [Four-hour enforced soak — 0.1.0-rc.2 final tip](../verification/2026-11-17-soak.md): PASS on both supported hosts, OpenCode 2.2.7 and 2.3.0, with 240 samples over 14,439 s each, 0 failures, settled queue/native state, and growth within both gates

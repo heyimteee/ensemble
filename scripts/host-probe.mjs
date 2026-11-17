@@ -714,7 +714,7 @@ ensureCase("setup").push({
   version: 1,
   recordedAt: "2026-11-10",
   versions,
-  declaredTypes: "@opencode/plugin 2.2.1, @opencode/client 2.2.1",
+  declaredTypes: "@opencode/plugin 2.3.0, @opencode/client 2.3.0",
   note: "Fixed synthetic prompts only. Text is recorded as length plus digest; paths are placeholders.",
 })
 

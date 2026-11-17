@@ -1367,7 +1367,7 @@ export class EnsembleV2Service {
    * Mirror of the host permission lifecycle for Ensemble-bound sessions.
    *
    * Supported plugin API surface (verified against installed
-   * `@opencode/plugin@2.2.1` + `@opencode/client` promise types):
+   * `@opencode/plugin@2.3.0` + `@opencode/client` promise types):
    * - events `permission.asked` (`data`: `sessionID`, `id`, `action`,
    *   `resources`, `source?`, `message?`) and `permission.replied` (`data`:
    *   `sessionID`, `requestID`, `reply: once|always|reject`) via
