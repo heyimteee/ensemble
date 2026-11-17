@@ -71,6 +71,10 @@ jobs:
         env:
           ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
         run: npm run test:live:lifecycle
+      - name: Quickstart E2E
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:quickstart
       - name: Native subagent probe
         env:
           ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts

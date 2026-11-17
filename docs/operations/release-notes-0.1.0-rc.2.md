@@ -1,3 +1,9 @@
+---
+title: Ensemble 0.1.0-rc.2 release notes
+description: Historical 0.1.0-rc.2 prerelease notes and verification summary.
+version: 0.1.0-rc.2
+---
+
 # Ensemble 0.1.0-rc.2 release notes
 
 Status: **published prerelease.** `0.1.0-rc.2` is live on npm and as GitHub

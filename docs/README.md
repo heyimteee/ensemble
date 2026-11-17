@@ -1,3 +1,9 @@
+---
+title: Ensemble documentation
+description: Install Ensemble, learn the mental model, complete tasks, and look up exact behavior.
+version: 0.1.x
+---
+
 # Ensemble documentation
 
 Ensemble is a persistent agent team inside OpenCode: one group chat, named
@@ -137,6 +143,8 @@ navigation.
   canonical terms.
 - [Changelog](../CHANGELOG.md): stable and prerelease history.
 
-`npm run docs:check` validates the current contract, host, and Node claims,
-keeps every docs section reachable from this home, and requires every current
+`npm run docs:check` validates the page inventory and frontmatter, internal
+links and anchors, Markdown and shell fences, the current contract, host, and
+Node claims, generated-reference freshness, and the docs site build. It also
+keeps every docs section reachable from this home and requires every current
 verification record to be linked from the evidence index.

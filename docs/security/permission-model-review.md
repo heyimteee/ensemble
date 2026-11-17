@@ -1,3 +1,9 @@
+---
+title: Permission-model review
+description: How Ensemble preserves OpenCode permissions and scopes approvals.
+version: 0.1.x
+---
+
 # Permission-model review
 
 - **Status:** Accepted for the 0.1 release candidate

@@ -1,3 +1,9 @@
+---
+title: Release sign-off checklist
+description: Historical 0.1.0-rc.2 sign-off checklist and evidence.
+version: 0.1.0-rc.2
+---
+
 # Release sign-off checklist
 
 Ticket #275. Complete every item before creating the release tag, then copy the

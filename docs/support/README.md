@@ -1,3 +1,9 @@
+---
+title: Support
+description: Support channels, response expectations, evidence collection, and redaction rules.
+version: 0.1.x
+---
+
 # Support
 
 Ensemble is in developer preview. Support is **best effort through GitHub

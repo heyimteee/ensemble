@@ -1566,7 +1566,7 @@ export const CLI_DOCS = [
 
 export const MAINTAINER_COMMANDS = [
   ["issue:hygiene", "Read-only GitHub listing of parent issues whose sub-issues are all closed. Never edits or closes issues."],
-  ["docs:check", "Contract, host, Node, navigation, evidence, and generated-reference freshness."],
+  ["docs:check", "Page inventory, frontmatter, links and anchors, Markdown and shell syntax, contract/host/Node claims, generated reference, media, and docs-site build."],
   ["docs:reference", "Regenerate the reference pages from the code catalogs."],
   ["verify", "Typecheck plus the unit test suite."],
   ["test", "Unit tests only."],

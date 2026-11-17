@@ -1,3 +1,9 @@
+---
+title: Guides
+description: Task-shaped walkthroughs and recipes for routing, Work, approvals, settings, and recovery.
+version: 0.1.x
+---
+
 # Guides
 
 Task-shaped walkthroughs for daily use. Each guide states what you need before

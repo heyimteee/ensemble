@@ -1,3 +1,9 @@
+---
+title: Incident runbook
+description: Diagnose and recover a broken workspace, stuck work, failed upgrade, or data loss.
+version: 0.1.x
+---
+
 # Incident runbook
 
 Use this runbook when Ensemble is not loading, a workspace is stuck or

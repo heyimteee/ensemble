@@ -1,3 +1,9 @@
+---
+title: Data classes, retention, export, and delete
+description: What Ensemble stores, how long it is retained, and how to export or delete it.
+version: 0.1.x
+---
+
 # Data classes, retention, export, and delete
 
 This page is the user-facing data policy for Ensemble (ticket #272, parent #268).

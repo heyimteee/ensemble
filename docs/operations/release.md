@@ -1,3 +1,9 @@
+---
+title: Release operations
+description: Run the tag-driven release workflow, required checks, dry run, and post-release steps.
+version: 0.1.x
+---
+
 # Release operations
 
 Ticket #275. A version tag is the only path that publishes Ensemble. This page

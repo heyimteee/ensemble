@@ -1,3 +1,9 @@
+---
+title: Privacy
+description: Data classes, retention, export, delete, and local-only diagnostics.
+version: 0.1.x
+---
+
 # Privacy
 
 What Ensemble stores, where it stays, how long it is retained, and how to export

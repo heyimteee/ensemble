@@ -1,3 +1,9 @@
+---
+title: Support matrix and known limitations
+description: Supported hosts, Node versions, platforms, live-suite prerequisites, and limitations.
+version: 0.1.x
+---
+
 # Support matrix and known limitations
 
 This page is the support boundary for the public preview. A supported

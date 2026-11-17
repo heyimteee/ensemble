@@ -1,3 +1,9 @@
+---
+title: Evidence index
+description: Public architecture decisions, verification records, assessments, and compatibility evidence.
+version: 0.1.x
+---
+
 # Evidence index
 
 Public engineering evidence: architecture decisions, verification records,
@@ -32,6 +38,7 @@ its tickets.
 
 ## Verification records
 
+- [Documentation quality gates and quickstart audit](../verification/2026-11-17-ticket-310.md): the extended docs contract (inventory, frontmatter, links/anchors, fences, shell, canonical claims, reference, media, site build), the packed-install quickstart TUI E2E and 29.4 s timing, the docs/rationale PR guard, and the unrun human-usability limit
 - [Documentation visuals and accessibility](../verification/2026-11-17-ticket-309.md): the synthetic terminal replay and screenshots, rendered Mermaid diagrams with accessible titles/descriptions, manifest and alt/caption checks, keyboard/heading/contrast/reduced-motion measurements, and the remaining unrun browser and install limits
 - [Public release readiness — parent #268](../verification/2026-11-17-ticket-268.md): the released `0.1.0-rc.2` state, every child ticket result including #277 macOS verification and #281–#287, the final-tip install/fake/soak evidence, green required CI at `a7f1eb3`, the full macOS checklist including 1.7, the public-registry smoke on 2.2.7/2.3.0, npm `latest`/`next` behavior, and the remaining announcement decision
 - [Live TUI readiness after opening Ensemble](../verification/2026-11-17-ticket-287.md): statusline-gated `live_open_ensemble`, a header-only guard test, the deterministic command-line retype ordering, and passing 2.3.0/2.2.7 fake suites

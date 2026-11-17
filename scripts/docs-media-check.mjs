@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto"
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const MANIFEST = "docs/public/media/MANIFEST.json"
@@ -297,8 +297,11 @@ export function checkDocsMedia(root = REPO_ROOT) {
   return failures
 }
 
-const help = process.argv.includes("--help") || process.argv.includes("-h")
-if (help) {
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+const help = invokedDirectly && (process.argv.includes("--help") || process.argv.includes("-h"))
+if (!invokedDirectly) {
+  // Imported by docs-check or a contract test; the exported function owns the result.
+} else if (help) {
   console.log(`Usage: node scripts/docs-media-check.mjs [--root DIR]
 
 Validates the committed documentation media manifest and hashes, screenshot

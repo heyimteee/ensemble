@@ -1,3 +1,9 @@
+---
+title: Ensemble 0.1.0 release notes
+description: Stable 0.1.0 release notes, package contents, and verification summary.
+version: 0.1.0
+---
+
 # Ensemble 0.1.0 release notes
 
 Status: **stable 0.x release.** Published from tag `v0.1.0`; the runtime is

@@ -1,3 +1,9 @@
+---
+title: Documentation style guide
+description: Voice, terminology, page template, code sample rules, and visual rules for Ensemble docs.
+version: 0.1.x
+---
+
 # Documentation style guide
 
 This guide applies to every page under `docs/`, the root `README.md`, and
@@ -204,4 +210,9 @@ Rules:
 - [ ] Internal evidence is a **Go deeper** link, not a step.
 - [ ] The page is linked from the right section index.
 - [ ] Moved entries are recorded in the redirect map.
-- [ ] `npm run docs:check` and `npm run verify` pass.
+- [ ] The page has title, description, and version front matter; the H1 matches
+      the title.
+- [ ] `npm run docs:check` passes, including its default docs-site build. The
+      explicit `--skip-site-build` mode exists for fixture tests, not the
+      release gate.
+- [ ] `npm run verify` passes.

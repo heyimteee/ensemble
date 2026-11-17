@@ -1,3 +1,9 @@
+---
+title: Package rollback
+description: Reverse a package upgrade, with state rollback only when required.
+version: 0.1.x
+---
+
 # Package rollback
 
 Ticket #273. Use this when a release upgrade must be reversed: the previous

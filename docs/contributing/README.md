@@ -1,3 +1,9 @@
+---
+title: Contributing
+description: Development workflow, documentation process, evidence, and review boundaries.
+version: 0.1.x
+---
+
 # Contributing
 
 How to work on Ensemble code and documentation. Start with the repository
@@ -27,13 +33,19 @@ docs index.
 Build the docs site locally with `npm run docs:site` and publish-preview it with
 `npm run docs:site:preview`. `npm run docs:site:build` runs the sidebar,
 reachability, redirect, SEO, sitemap, and generated-artifact checks before the
-VitePress build; keep `npm run docs:check` separate and fast as the Docs
-workflow does.
+VitePress build. `npm run docs:check` is the full docs gate: inventory,
+frontmatter, links and anchors, Markdown fences, shell syntax, canonical
+version/host/Node claims, generated reference freshness, media, and the
+VitePress build. Fixture tests use the explicit `--skip-site-build` mode; CI
+runs the full check.
 
-Update user documentation when externally visible behavior changes. Keep ADRs
-and verification records public, but do not put them in the primary user
-navigation; link them from the [evidence index](evidence.md) or as a **Go
-deeper** link at the end of a concept page.
+Update user documentation when externally visible behavior changes. If no doc
+update is needed, put a `docs-not-needed: <reason>` line in the pull request
+body; the `docs-rationale` workflow checks the changed-file list and PR body
+from the trusted base checkout. Keep ADRs and verification records public, but
+do not put them in the primary user navigation; link them from the
+[evidence index](evidence.md) or as a **Go deeper** link at the end of a
+concept page.
 
 ## Review and process
 

@@ -1,3 +1,9 @@
+---
+title: Upgrade from the pre-release to the first release
+description: Move from a 0.1.0 prerelease to the stable 0.1.0 package and verify the workspace.
+version: 0.1.x
+---
+
 # Upgrade from the pre-release to the first release
 
 Ticket #273. This guide moves a workspace from the linked pre-release to the

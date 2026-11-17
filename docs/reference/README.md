@@ -1,3 +1,9 @@
+---
+title: Reference
+description: Generated tools, commands, keyboard, configuration, environment, files, CLI, and host support.
+version: 0.1.x
+---
+
 # Reference
 
 Look-up documentation for the exact surface: tools, commands, keyboard

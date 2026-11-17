@@ -1,0 +1,39 @@
+name: Docs rationale
+
+# Ticket #310: every user-visible pull request either updates documentation or
+# records an explicit `docs-not-needed: <reason>` decision. This workflow uses
+# `pull_request_target` and checks out the trusted base commit. It reads the PR
+# body and changed-file list as data only; it never checks out or executes pull
+# request code, uses repository secrets, or requests write permission.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  docs-rationale:
+    name: docs-rationale
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Evaluate changed files and PR body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ensemble-docs-rationale"
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --jq '.[].filename' > "$RUNNER_TEMP/ensemble-docs-rationale/files.txt"
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/ensemble-docs-rationale/body.md"
+          node --experimental-strip-types scripts/docs-rationale.mjs \
+            --files "$RUNNER_TEMP/ensemble-docs-rationale/files.txt" \
+            --body "$RUNNER_TEMP/ensemble-docs-rationale/body.md"
