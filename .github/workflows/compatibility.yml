@@ -22,7 +22,7 @@ jobs:
         # native host contract probe and the deterministic fake smoke.
         opencode: ["2.2.6", "2.2.7", "2.3.0"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -57,14 +57,14 @@ jobs:
         run: npm run test:live:fake:all
       - name: Upload sanitized host contract record
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: host-contract-${{ matrix.opencode }}
           path: ${{ runner.temp }}/native-host-contract-${{ matrix.opencode }}.jsonl
           if-no-files-found: ignore
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-artifacts-${{ matrix.opencode }}
           path: ${{ runner.temp }}/ensemble-live-artifacts

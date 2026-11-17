@@ -131,7 +131,7 @@ function hasArtifacts(block: string): boolean {
 }
 
 function hasFailureUpload(block: string): boolean {
-  return /uses:\s*actions\/upload-artifact@v4/.test(block) && /^\s*if:\s*failure\(\)\s*$/m.test(block)
+  return /uses:\s*actions\/upload-artifact@v7/.test(block) && /^\s*if:\s*failure\(\)\s*$/m.test(block)
 }
 
 /** One upload step for `path` that runs only on failure. */
@@ -141,7 +141,7 @@ function hasFailureUploadOf(block: string, path: string): boolean {
     (step) =>
       step.includes(`path: ${path}`) &&
       /^\s*if:\s*failure\(\)\s*$/m.test(step) &&
-      /uses:\s*actions\/upload-artifact@v4/.test(step),
+      /uses:\s*actions\/upload-artifact@v7/.test(step),
   )
 }
 
@@ -201,7 +201,7 @@ function checkLiveJob(
     failures.push(`${file}: ${job} must set ENSEMBLE_LIVE_ARTIFACTS to ${ARTIFACTS_PATH}`)
   }
   if (!hasFailureUpload(block)) {
-    failures.push(`${file}: ${job} must upload failure artifacts with actions/upload-artifact@v4`)
+    failures.push(`${file}: ${job} must upload failure artifacts with actions/upload-artifact@v7`)
   }
   if (!hasLiveHostAction(block)) {
     failures.push(`${file}: ${job} must use ./.github/actions/live-host`)
@@ -420,7 +420,7 @@ export function checkReleaseWorkflow(text: string): string[] {
     ]) {
       if (!pkg.includes(command)) failures.push(`${file}: package must run ${command}`)
     }
-    if (!/uses:\s*actions\/upload-artifact@v4/.test(pkg)) {
+    if (!/uses:\s*actions\/upload-artifact@v7/.test(pkg)) {
       failures.push(`${file}: package must upload the tarball and the SBOM`)
     }
   }
@@ -577,7 +577,7 @@ export function checkCompatibilityWorkflow(text: string, supportedHosts: readonl
   if (!text.includes(`path: ${ARTIFACTS_PATH}`)) {
     failures.push(`${file}: failure artifacts must be uploaded from ${ARTIFACTS_PATH}`)
   } else if (!hasFailureUploadOf(text, ARTIFACTS_PATH)) {
-    failures.push(`${file}: live artifacts must use actions/upload-artifact@v4 with if: failure()`)
+    failures.push(`${file}: live artifacts must use actions/upload-artifact@v7 with if: failure()`)
   }
   return failures
 }
