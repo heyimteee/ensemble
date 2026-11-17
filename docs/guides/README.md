@@ -5,9 +5,34 @@ you start, the steps to take, the result you should see, and where to go next.
 Use [Concepts](../concepts/README.md) when you need the mental model and
 [Reference](../reference/README.md) when you need exact behavior.
 
-## Current guides
+## Set up your team
 
-These existing pages cover the most requested operator and usage paths:
+| Task | Guide |
+|---|---|
+| Create agents, then bind them to a project workspace | [Create a workspace and agents](create-workspace-and-agents.md) |
+| Change members or the leader | [Edit members and the leader](edit-members-and-leader.md) |
+| Add the generated `AGENTS.md` block and `.ensemble` metadata | [Initialize a workspace](initialize-a-workspace.md) |
+
+## Work day to day
+
+| Task | Guide |
+|---|---|
+| Send a group or direct message, use `$Name`, or reference a file with `@path` | [Route a group or direct message](route-messages.md) |
+| Assign and invoke reusable guidance | [Use a skill](use-skills.md) |
+| Focus and page through work, then delegate, reassign, retry, restart, cancel, or open a native session | [Use the Work pane](use-the-work-pane.md) |
+| Resolve the sticky summary or the full approvals inbox | [Resolve an approval](resolve-approvals.md) |
+
+## Configure and protect
+
+| Task | Guide |
+|---|---|
+| Set identity, main and backup models, Skillbox, and save behavior | [Configure an agent](configure-an-agent.md) |
+| Add, edit, delete, or promote saved knowledge | [Manage memory](manage-memory.md) |
+| Choose a recovery backup or data export, then restore or roll back | [Back up or restore](back-up-or-restore.md) |
+
+## Operator procedures
+
+These existing pages cover recovery and upgrade paths:
 
 | Task | Guide |
 |---|---|
@@ -17,25 +42,6 @@ These existing pages cover the most requested operator and usage paths:
 | Recover a broken workspace or stuck work | [Incident runbook](../support/incident-runbook.md) |
 | Find a key by context | [Keyboard reference](../../README.md#keyboard) |
 | Understand the leader, work, and budgets before delegating | [Concepts](../concepts/README.md) |
-
-## Daily-use guides
-
-These task pages follow the same shape: prerequisites, steps, expected result,
-and next link. Until each one exists, the [root README feature
-overview](../../README.md#what-it-does), the [keyboard
-reference](../../README.md#keyboard), and [Concepts](../concepts/README.md) are
-the current sources for:
-
-- Create, edit, archive, and delete a workspace or agent.
-- Add members, choose a leader, and move an agent between workspaces.
-- Send a group message, address one agent with `$Name`, and reference a file
-  with `@path`.
-- Use the Work pane: focus, page, delegate, reassign, retry, restart, cancel,
-  and open a native session.
-- Resolve the sticky approval summary and the full approvals inbox.
-- Configure models, backup models, skills, and memory.
-- Initialize workspace files and understand the generated `AGENTS.md` block.
-- Export or delete workspace data.
 
 ## Recipes
 
