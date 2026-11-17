@@ -49,7 +49,7 @@ the site navigation and at the top of the README. The existing `favicon.svg`
 keeps its dark tile for browser chrome. The README uses the public GitHub raw
 URL so the logo also loads on the npm package page.
 
-The synthetic captures were regenerated at 140×40 with full-window framing.
+The quickstart E2E now waits for Insert mode in each wizard field instead of racing the field focus. The synthetic captures were regenerated at 140×40 with full-window framing.
 The earlier 110×34 shell view and cropped pane views made the UI feel cramped;
 every screenshot and the replay now show all three panes with surrounding
 space. Images are 1400×800 and remain clickable to full size.
@@ -85,7 +85,7 @@ keyword and comment colours.
 | `npm run docs:site:build` | ok; 186 pages, 42 redirects, local search, sitemap, `llms.txt`, `llms-full.txt`; built anchors 2,136 fragments across 18,387 internal links |
 | `npm run docs:media:check` | ok |
 | `npm run docs:reference:check` | ok: 6 native tools, 11 legacy tools, 17 `:` commands, 15 `/` commands, 9 generated pages |
-| `npm run test:live:quickstart` | PASS; packed install through `REPLIED` work item |
+| `npm run test:live:quickstart` | PASS twice locally after hardening; packed install through `REPLIED` work item |
 
 ## Remaining external actions
 

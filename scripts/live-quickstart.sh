@@ -171,19 +171,35 @@ live_log "PASS /ensemble: empty ENSEMBLE page reached through the TUI"
 
 # --- product path: two agent wizards ---------------------------------------
 
+live_ensure_insert() {
+  local label="$1"
+  if live_capture_contains "$LIVE_TUI_SESSION" "INSERT"; then return 0; fi
+  live_key "$LIVE_TUI_SESSION" "i"
+  if ! live_poll_for 2 live_capture_contains "$LIVE_TUI_SESSION" "INSERT"; then
+    # A fresh wizard field can open in Visual mode; Escape returns it to
+    # Normal, where i reliably enters Insert.
+    live_key "$LIVE_TUI_SESSION" Escape
+    live_key "$LIVE_TUI_SESSION" "i"
+  fi
+  live_wait_for 10 "$label Insert mode" live_capture_contains "$LIVE_TUI_SESSION" "INSERT" \
+    || live_fail_timing "$label did not enter Insert mode"
+}
+
 create_agent() {
   local name="$1" title="$2" role="$3"
   live_select_pane "$LIVE_TUI_SESSION" agents
   live_enter_selected_pane "$LIVE_TUI_SESSION"
   live_key "$LIVE_TUI_SESSION" "a"
   live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard for $name"
-  live_key "$LIVE_TUI_SESSION" "i"
+  live_ensure_insert "agent name"
   live_type "$LIVE_TUI_SESSION" "$name"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step for $name"
+  live_ensure_insert "agent title"
   live_type "$LIVE_TUI_SESSION" "$title"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step for $name"
+  live_ensure_insert "agent role"
   live_type "$LIVE_TUI_SESSION" "$role"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step for $name"
@@ -222,7 +238,7 @@ live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "workspace directory step"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
-live_key "$LIVE_TUI_SESSION" "i"
+live_ensure_insert "workspace name"
 live_type "$LIVE_TUI_SESSION" "acme-notes"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "workspace members step"
@@ -271,7 +287,7 @@ live_key "$LIVE_TUI_SESSION" C-g
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "group chat before the composer"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "j/k scroll" 10 "group chat interaction"
-live_key "$LIVE_TUI_SESSION" "i"
+live_ensure_insert "composer"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
 live_type "$LIVE_TUI_SESSION" "Summarize what this project is for in three bullets."
 live_key "$LIVE_TUI_SESSION" Enter
