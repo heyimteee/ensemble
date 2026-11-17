@@ -70,8 +70,8 @@ Expected evidence:
 | Doctor against restored state | Zero mismatches |
 | Busy service | `busy`; nothing is written |
 
-A real package downgrade rehearsal (install `0.1.0`, then reinstall
-`0.1.0-rc.2`) is blocked until the candidate is published and a previous
-installable version exists. Record it in the release sign-off (#278) rather
-than claiming it here. The blocked check is listed in
+A real package downgrade rehearsal is blocked because `0.1.0-rc.2` is the first
+published version, so there is no earlier installable version to return to.
+Record it in the release sign-off (#278) rather than claiming it here. The
+blocked check is listed in
 [the ticket #273 record](../verification/2026-11-16-ticket-273.md).

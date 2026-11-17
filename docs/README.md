@@ -3,7 +3,7 @@
 ## Product
 
 - [Project overview](../README.md)
-- [Changelog](../CHANGELOG.md): release history and the `0.1.0-rc.2` candidate notes; the tag-driven workflow uses the matching version section as the GitHub release body
+- [Changelog](../CHANGELOG.md): release history, including the published `0.1.0-rc.2` prerelease; the tag-driven workflow uses the matching version section as the GitHub release body
 - [Domain glossary](../GLOSSARY.md)
 - [Implementation and acceptance notes](implementation.md)
 - [Scale, soak, and local diagnostics](operations/scale-and-monitoring.md): operating envelope, soak/leak harness, support bundle, and no-telemetry policy
@@ -49,13 +49,13 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Upgrade from the pre-release](operations/upgrade.md): native-first defaults, AGENTS v7, the native-state refactor, and additive durable-state migrations
 - [Package rollback](operations/rollback.md): package-only and state rollback, plus the rehearsed failure path
 - [Release operations](operations/release.md): the tag-driven workflow, the token-free dry run, main protection and its 11 real check contexts, provenance, the SBOM, and the changelog-based GitHub release
-- [Release notes for 0.1.0-rc.2](operations/release-notes-0.1.0-rc.2.md): the public-facing candidate notes, install/upgrade/rollback path, support route, and known limitations
-- [Launch plan for 0.1.0-rc.2](operations/launch-plan-0.1.0-rc.2.md): audience, channels, support path, rollback triggers, and the human-gated publish/announce sequence
-- [Release sign-off checklist](operations/release-signoff.md): the completed candidate sign-off plus the final pre-tag gate for security, MIT license/legal, package contents, clean-install proof, rollback, support readiness, publish, and post-release checks
+- [Release notes for 0.1.0-rc.2](operations/release-notes-0.1.0-rc.2.md): the published-prerelease notes, public install smoke, install/upgrade/rollback path, support route, npm `latest` caveat, and known limitations
+- [Launch plan for 0.1.0-rc.2](operations/launch-plan-0.1.0-rc.2.md): audience, channels, support path, rollback triggers, and the completed publish sequence; the announcement remains separate
+- [Release sign-off checklist](operations/release-signoff.md): the completed released sign-off for `0.1.0-rc.2`, including the public install smoke, npm `latest` caveat, provenance, GitHub release, and the reusable pre-tag gate for a future release
 
 ## Verification
 
-- [Public release readiness — parent #268](verification/2026-11-17-ticket-268.md): the `0.1.0-rc.2` version/tag decision, every child ticket result including the #285 CI build fix, #286 OpenCode 2.3.0 support, #287 live TUI readiness, and #277 macOS verification, the final-tip install/fake/soak evidence, the green required CI at `a7f1eb3`, the full macOS checklist including 1.7, the READY FOR PUBLISH APPROVAL decision, and the remaining human-gated publish steps
+- [Public release readiness — parent #268](verification/2026-11-17-ticket-268.md): the released `0.1.0-rc.2` state, every child ticket result including #277 macOS verification and #281–#287, the final-tip install/fake/soak evidence, green required CI at `a7f1eb3`, the full macOS checklist including 1.7, the public-registry smoke on 2.2.7/2.3.0, npm `latest`/`next` behavior, and the remaining announcement decision
 - [Live TUI readiness after opening Ensemble](verification/2026-11-17-ticket-287.md): statusline-gated `live_open_ensemble`, a header-only guard test, the deterministic command-line retype ordering, and passing 2.3.0/2.2.7 fake suites
 - [Four-hour enforced soak — 0.1.0-rc.2 final tip](verification/2026-11-17-soak.md): PASS on both supported hosts, OpenCode 2.2.7 and 2.3.0, with 240 samples over 14,439 s each, 0 failures, settled queue/native state, and growth within both gates
 - [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence

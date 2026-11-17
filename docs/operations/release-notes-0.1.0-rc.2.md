@@ -1,14 +1,14 @@
 # Ensemble 0.1.0-rc.2 release notes
 
-Status: **release candidate, not published at the time of writing.** The
-public npm version/tag, GitHub release, and announcement are human-gated and
-pending. This note describes the artifact that was built, installed through
-`opencode plugin add`, and checked on Linux and macOS.
+Status: **published prerelease.** `0.1.0-rc.2` is live on npm and as GitHub
+release `v0.1.0-rc.2`, marked prerelease. This note describes the published
+artifact, its public-registry install smoke on Linux, and the macOS checks.
+A launch announcement remains a separate decision.
 
 Ensemble is a persistent agent team inside OpenCode. One plugin package carries
 the server that owns state, routing, Work, native sessions, and RPC, plus the
-TUI workspace and the `/ensemble` route. This is the first package release
-candidate.
+TUI workspace and the `/ensemble` route. This is the first public package
+release, published as a prerelease.
 
 ## Release identity
 
@@ -20,18 +20,18 @@ candidate.
 | Supported OpenCode | `2.2.6`, `2.2.7`, and `2.3.0` (Linux/tmux) |
 | OpenCode peer range | `2.2.6 || 2.2.7 || 2.3.0` |
 | Node floor | `22.23.4`; live suites use `26.12.1` |
-| npm dist-tag when published | `next` (a prerelease never becomes `latest`) |
-| Public release tag | Not cut; pending the remaining manual check and publish approval |
+| npm dist-tags | `latest: 0.1.0-rc.2`, `next: 0.1.0-rc.2` |
+| Public release tag | `v0.1.0-rc.2` (GitHub prerelease) |
+| Public release | <https://github.com/heyimteee/ensemble/releases/tag/v0.1.0-rc.2> |
 | Verification tag | `rc-0.1.0-rc.2` (evidence base at `d74fc3d`; it predates the #281–#284 fixes) |
 
-The candidate version is unchanged. No rebuild or version bump is planned for
-the remaining manual check. The final public version and tag are cut only
-after that check and the human publish approval. If the approved artifact stays
-at `0.1.0-rc.2`, the workflow requires the tag `v0.1.0-rc.2` and publishes
-under `next`; a final `0.1.0` is a separate version and tag. Do not publish
-from the older `rc-0.1.0-rc.2` evidence tag.
+The published version is `0.1.0-rc.2`. The release workflow published with
+`--tag next`, but npm requires a `latest` tag and rejects deleting it
+(`npm dist-tag rm ... latest` returns E400). Because this is the first and only
+published version, `latest` necessarily points at the RC as well. Pin the exact
+version for deliberate installs; a later stable release will move `latest`.
 
-## What is in this candidate
+## What is in this release
 
 - MIT-licensed package identity with a runtime-only `dist/` tarball.
 - A compiled server, TUI, and RPC package; the TUI uses the Solid OpenTUI
@@ -53,14 +53,31 @@ from the older `rc-0.1.0-rc.2` evidence tag.
 - OpenCode 2.3.0 support: Linux host probe 14/14, size matrix, deterministic
   fake E2E, and loopback install. The compatibility matrix and required context
   include 2.3.0. (#286)
-- Fixes in this candidate: interrupted init restores `AGENTS.md` (#281),
+- Fixes in this release: interrupted init restores `AGENTS.md` (#281),
   `NO_COLOR` suppresses Work and transcript decoration (#282, #284), and the
   Work feed rebuilds after a service restart (#283).
 
-## Install after publish
+## Public install smoke
 
-Pin the exact candidate; do not rely on `latest` while a prerelease is the only
-package on the `next` channel.
+PASS on OpenCode 2.2.7 and 2.3.0 with Node 26.12.1:
+
+- `opencode plugin add @heyimteee/ensemble@0.1.0-rc.2` installed from the
+  public npm registry.
+- `opencode plugin list` reported `ensemble.v2 0.1.0-rc.2` from the public
+  package source.
+- The plugin record matched the package target and version, reported
+  server/TUI/RPC true and active, and loaded its entrypoint from the public
+  plugin cache, never the repository.
+- One host turn reported `ensembleToolCount 6`.
+- `/ensemble` rendered `ENSEMBLE │ no workspace` with no plugin failure.
+- Each version used isolated HOME/XDG/project/cache roots; services were
+  stopped and directories removed afterwards.
+
+## Install from npm
+
+Pin the exact published version. A bare `npm install @heyimteee/ensemble` or
+`opencode plugin add @heyimteee/ensemble` currently resolves the RC because
+`latest` and `next` both point at the only published version.
 
 ```sh
 opencode plugin add @heyimteee/ensemble@0.1.0-rc.2
@@ -68,8 +85,8 @@ opencode plugin list
 ```
 
 `opencode plugin list` must show `ensemble.v2` with version `0.1.0-rc.2` and the
-package source `@heyimteee/ensemble@0.1.0-rc.2`. Restart OpenCode after the
-install, then open `/ensemble` or the **Open Ensemble** palette command.
+public package source `@heyimteee/ensemble@0.1.0-rc.2`. Restart OpenCode after
+the install, then open `/ensemble` or the **Open Ensemble** palette command.
 
 Do not also load the same plugin from `.opencode/plugins/`; that creates a
 duplicate plugin ID. Do not use a Git spec with OpenCode 2.2.7: `github:`,
@@ -163,17 +180,19 @@ logs. Maintainer response targets are best effort, not an SLA.
 - **macOS size-matrix load probe is Linux-only.** Exact sizes pass with the
   load probe skipped. Braille glyphs depend on terminal font fallback on the
   tested Mac.
-- **The package is not on the public registry yet.** The commands above become
-  valid only after the human-gated publish completes.
+- **The prerelease owns npm `latest`.** `0.1.0-rc.2` is the only published
+  version, so both `latest` and `next` point at it. npm requires `latest` and
+  rejects deleting it (E400). Pin `0.1.0-rc.2`; a later stable release will
+  move `latest`.
 
 ## Proven and pending
 
 The final-tip runtime checks at `b194b95` established the 2.2.x evidence. The
 latest tip `a7f1eb3` adds OpenCode 2.3.0 support (#286), hardens live TUI
 readiness (#287), and passes the full required CI matrix on the first attempt.
-The full macOS checklist including 1.7 also passes. All verification gates are
-now complete; the release is ready for publish approval. The clean install is
-still a loopback-registry check, not a public npm install.
+The full macOS checklist including 1.7 also passes. The release is published:
+`0.1.0-rc.2` is live on npm and GitHub, and the public-registry install smoke
+passes on 2.2.7 and 2.3.0.
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -190,8 +209,11 @@ still a loopback-registry check, not a public npm install.
 | macOS mouse drag (1.7) | **PASS** | Pane-bounded Shift+drag over the composer marker, then explicit `copy_to_clipboard`; statusline and focus unchanged. |
 | Automatic copy-on-release on macOS | **NOT CLAIMED** | Ghostty `copy-on-select` is off; explicit copy is required. |
 | 4-hour enforced soak at `b194b95` | **PASS on OpenCode 2.2.7 and 2.3.0** | 2.2.7: 240 samples, 14,439 s, 5,234 messages, 0 failures, 92.59 MiB/h and 18.71 MiB/1k. 2.3.0: 240 samples, 5,240 messages, 0 failures, 94.89 MiB/h and 19.14 MiB/1k. [soak record](../verification/2026-11-17-soak.md) |
-| Public npm publish, tag, GitHub release, public-registry install smoke, announcement | **PENDING** | Human-gated; see [launch plan](launch-plan-0.1.0-rc.2.md) |
+| Public npm publish and tag | **PASS** | `0.1.0-rc.2` on npm; GitHub prerelease `v0.1.0-rc.2` at [release](https://github.com/heyimteee/ensemble/releases/tag/v0.1.0-rc.2). `latest` and `next` both point at the RC. |
+| Provenance attestation and GitHub release assets | **PASS** | npm provenance; GitHub release assets are the tarball, CycloneDX SBOM, CHANGELOG, and release notes. |
+| Public-registry install smoke | **PASS** | OpenCode 2.2.7 and 2.3.0, Node 26.12.1; public package source, six tools, installed TUI route, `/ensemble` with no plugin failure. |
+| Launch announcement | **PENDING / not claimed** | A separate decision; the release is already published. |
 
 The full release decision, sign-offs, and remaining gates are in
-[Release sign-off](release-signoff.md#candidate-sign-off--010-rc2-2026-11-17)
+[Release sign-off](release-signoff.md#release-sign-off--010-rc2-released-2026-11-17)
 and [Parent #268 verification](../verification/2026-11-17-ticket-268.md).

@@ -7,9 +7,9 @@ All notable changes to Ensemble are recorded here. The format follows
 The tag-driven release workflow reads the `## [<version>]` section for the
 version in `package.json` and uses it as the GitHub release body. A version
 without a non-empty section is refused by the release preflight. The
-`0.1.0-rc.3` entry is the current prerelease note; the final public version and
-announcement remain pending. These entries are release history, not a launch
-announcement.
+`0.1.0-rc.3` entry is the current prerelease note; `0.1.0-rc.2` is the first
+public prerelease. The final stable version and any launch announcement remain
+separate decisions.
 
 ## [Unreleased]
 
@@ -37,10 +37,12 @@ Trusted-publishing validation release. The runtime is identical to
 
 ## [0.1.0-rc.2] - 2026-11-16
 
-Release candidate for the first public package release: one MIT-licensed
-OpenCode plugin package containing the server and TUI parts. The candidate
-identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
-#281–#284 fixes. It is not published at the time of this entry.
+First public prerelease: one MIT-licensed OpenCode plugin package containing
+the server and TUI parts. The candidate identity was set on 2026-11-16 and
+re-verified on macOS on 2026-11-17 after the #281–#284 fixes. Published to npm
+and GitHub as a prerelease on 2026-11-17. npm requires a `latest` tag and
+rejects deleting it, so `latest` and `next` both point at `0.1.0-rc.2` while it
+is the only published version.
 
 ### Added
 
@@ -123,6 +125,18 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
   `latency-smoke`), Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs,
   and Node Matrix. The earlier `a0c39c0` Compatibility failure and `4ccc410`
   reruns are superseded.
+- Public-registry install smoke PASS on OpenCode 2.2.7 and 2.3.0 with Node
+  26.12.1: `opencode plugin add @heyimteee/ensemble@0.1.0-rc.2` installed from
+  npm, `plugin list` reported `ensemble.v2 0.1.0-rc.2`, the plugin record was
+  active with server/TUI/RPC loaded from the public package cache, one host
+  turn reported `ensembleToolCount 6`, and `/ensemble` rendered without a
+  plugin failure. Each host used isolated HOME/XDG/project/cache roots.
+- GitHub release `v0.1.0-rc.2` exists and is marked prerelease, with the
+  tarball, CycloneDX SBOM, changelog, and release notes attached.
+- npm publishes `0.1.0-rc.2` under both `latest` and `next`. The workflow used
+  `--tag next`, but npm requires `latest` and rejects its removal with E400;
+  because this is the only published version, `latest` necessarily points at
+  the RC.
 - The `b194b95` install and 2.2.x fake evidence still applies to the 2.2.x
   runtime; #286 adds the 2.3.0 host range and is verified separately at
   `a0c39c0`.
@@ -144,9 +158,11 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 
 ### Known limitations
 
-- **Not published yet.** The public npm version/tag, GitHub release, and
-  announcement are pending human approval. This section is a candidate note,
-  not a launch announcement.
+- **The prerelease owns npm `latest`.** `0.1.0-rc.2` is the only published
+  version, so both `latest` and `next` point at it even though the workflow
+  used `--tag next`. npm requires `latest` and rejects deleting it (E400).
+  Pin the exact version; a stable release will move `latest`. The launch
+  announcement remains a separate decision.
 - **Windows is out of scope.** Native Windows and WSL are untested.
 - **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
   passed with a pane-bounded Shift+drag and explicit copy. Ghostty

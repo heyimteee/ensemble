@@ -1,8 +1,8 @@
 # Launch plan — Ensemble 0.1.0-rc.2
 
-Status: **ready for publish approval; not published.** Every verification gate
-passes. The tag, publish, GitHub release, and announcement remain human-gated.
-No agent may tag, publish, or announce.
+Status: **published 2026-11-17 as a prerelease.** Tag `v0.1.0-rc.2`, npm
+`0.1.0-rc.2`, and the GitHub prerelease exist. The launch announcement remains
+a separate, unclaimed decision.
 
 ## Release being launched
 
@@ -64,12 +64,11 @@ versions, OS, terminal host, install method, commands, and redacted evidence.
 Never request or post credentials, conversation content, private project
 files, or unredacted logs.
 
-## Human-gated publish sequence
+## Publish sequence (completed through public install smoke)
 
-1. **Approve the candidate.** The release manager reviews
-   [the sign-off](release-signoff.md), records the date and name, and
-   records the READY FOR PUBLISH APPROVAL decision, and accepts the inherent
-   package-downgrade gap. Every verification gate is PASS: required CI on all
+1. **Approved the candidate.** The release manager reviewed
+   [the sign-off](release-signoff.md), recorded the date and name, recorded the
+   publish-approval decision, and accepted the inherent package-downgrade gap. Every verification gate is PASS: required CI on all
    three OpenCode versions, both 4-hour soaks, both final installs, the full
    macOS checklist including 1.7, and #281–#287.
 2. **Freeze the release commit.** Merge the approved release commit; every
