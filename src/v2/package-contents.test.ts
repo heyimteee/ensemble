@@ -243,7 +243,7 @@ test("the package identity is the scoped MIT OpenCode plugin", () => {
   assert.equal(packageJson.author, "heyimteee")
   assert.equal(packageJson.repository?.type, "git")
   assert.equal(packageJson.repository?.url, "git+https://github.com/heyimteee/ensemble.git")
-  assert.equal(packageJson.homepage, "https://github.com/heyimteee/ensemble#readme")
+  assert.equal(packageJson.homepage, "https://heyimteee.github.io/ensemble/")
   assert.equal(packageJson.bugs?.url, "https://github.com/heyimteee/ensemble/issues")
   assert.ok(Array.isArray(packageJson.keywords) && packageJson.keywords.length > 0)
   assert.equal(packageJson.publishConfig?.access, "public")

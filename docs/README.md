@@ -54,7 +54,7 @@ or the [workspace shell](concepts/workspace-shell.md) for the pane model.
 1. Read [What is Ensemble?](getting-started/what-is-ensemble.md) and check the
    [support matrix](support/support-matrix.md) before you install on an
    unverified host.
-2. Follow [Install](getting-started/install.md) for the stable `0.1.0` package.
+2. Follow [Install](getting-started/install.md) for the stable `0.1.1` package.
 3. Complete the [Quickstart](getting-started/quickstart.md): two agents, one
    workspace, one message, and one finished work item.
 4. Continue with [First team](getting-started/first-team.md) to delegate work

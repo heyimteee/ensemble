@@ -27,10 +27,10 @@ boundary and known limitations before you start.
 | Step | Page | You will |
 |---|---|---|
 | 1 | [What is Ensemble?](what-is-ensemble.md) | Decide whether the three-pane team model fits how you work. |
-| 2 | [Install](install.md) | Add the stable `0.1.0` package, verify the plugin list, and open `/ensemble`. |
+| 2 | [Install](install.md) | Add the stable `0.1.1` package, verify the plugin list, and open `/ensemble`. |
 | 3 | [Quickstart](quickstart.md) | Create two agents and a workspace, send one message, and see a work item finish. |
 | 4 | [First team](first-team.md) | Choose a leader, delegate the first piece of work, and open an agent's native session. |
-| 5 | [Upgrade](upgrade.md) | Move from a prerelease to stable `0.1.0`, or roll back. |
+| 5 | [Upgrade](upgrade.md) | Move from a prerelease to stable `0.1.1`, or roll back. |
 
 ## If a step fails
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/public/logo.svg" width="120" height="120" alt="Ensemble logo: three vertical bars in blue, pale blue, and green">
+  <img src="https://raw.githubusercontent.com/heyimteee/ensemble/main/docs/public/logo.svg" width="120" height="120" alt="Ensemble logo: three vertical bars in blue, pale blue, and green">
 </p>
 
 <h1 align="center">Ensemble</h1>
@@ -17,11 +17,11 @@ work, and a Work pane that shows what every agent is doing while each agent's
 native OpenCode session runs underneath.
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.1
 ```
 
 <a href="docs/README.md#see-it-in-motion">
-  <img src="docs/public/media/workspace-shell.png" width="1200" alt="The Ensemble three-pane workspace at 140 columns: the rail lists Ada, Nova, and Rook in the synthetic acme-notes workspace; the chat shows a group message; the Work pane shows Ada's WORKING card and its hop budget." />
+  <img src="https://raw.githubusercontent.com/heyimteee/ensemble/main/docs/public/media/workspace-shell.png" width="1200" alt="The Ensemble three-pane workspace at 140 columns: the rail lists Ada, Nova, and Rook in the synthetic acme-notes workspace; the chat shows a group message; the Work pane shows Ada's WORKING card and its hop budget." />
 </a>
 
 *The three-pane workspace in the synthetic Acme Notes fixture. The
@@ -118,12 +118,12 @@ an unverified host.
 Install the stable release and confirm the plugin list entry:
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.1
 opencode plugin list
 ```
 
 ```text
-ensemble.v2  0.1.0  @heyimteee/ensemble@0.1.0
+ensemble.v2  0.1.1  @heyimteee/ensemble@0.1.1
 ```
 
 Restart OpenCode, then open the workspace from the command palette or with
@@ -192,7 +192,7 @@ before filing.
 
 ## Known limitations
 
-- **Stable is `0.1.0`.** npm `latest` points at `0.1.0`; prereleases stay under
+- **Stable is `0.1.1`.** npm `latest` points at `0.1.1`; prereleases stay under
   `next` (`0.1.0-rc.3`). Pin the exact version for deliberate installs. This is
   a 0.x release, so minor versions may still change APIs. See the
   [changelog](CHANGELOG.md).

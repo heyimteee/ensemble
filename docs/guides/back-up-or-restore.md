@@ -12,7 +12,7 @@ workspace's user data. They are different formats with different jobs.
 
 ## Before you start
 
-- You can run the operator commands from an Ensemble `0.1.0` checkout, or call
+- You can run the operator commands from an Ensemble `0.1.1` checkout, or call
   the documented RPC from an installed integration.
 - You know that a recovery backup contains conversation content and workspace
   state. Store it with owner-only permissions and keep it out of the repository.

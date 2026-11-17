@@ -11,7 +11,7 @@ member and one leader, so the agents come first.
 
 ## Before you start
 
-- Ensemble `0.1.0` is open in OpenCode. See
+- Ensemble `0.1.1` is open in OpenCode. See
   [Getting started](../getting-started/README.md).
 - OpenCode reports at least one model. The agent wizard cannot finish without a
   main model.

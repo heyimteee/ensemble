@@ -14,17 +14,17 @@
   "assets": {
     "workspace-shell.png": {
       "kind": "screenshot",
-      "bytes": 86854,
+      "bytes": 86741,
       "width": 1400,
       "height": 800,
-      "sha256": "6b9793d3b3eb8614adda8cfc374aa9e690d54a64ddf04b42b581eae1d8b877aa"
+      "sha256": "f0c7f4058a1a06cb7a5af9d31fb1dede353d1dda35954191d2d2b8ab3e8111ef"
     },
     "work-active.png": {
       "kind": "screenshot",
-      "bytes": 86854,
+      "bytes": 86741,
       "width": 1400,
       "height": 800,
-      "sha256": "6b9793d3b3eb8614adda8cfc374aa9e690d54a64ddf04b42b581eae1d8b877aa"
+      "sha256": "f0c7f4058a1a06cb7a5af9d31fb1dede353d1dda35954191d2d2b8ab3e8111ef"
     },
     "work-history.png": {
       "kind": "screenshot",
@@ -35,10 +35,10 @@
     },
     "approvals.png": {
       "kind": "screenshot",
-      "bytes": 78119,
+      "bytes": 89112,
       "width": 1400,
       "height": 800,
-      "sha256": "6c546a28cd44206ec7fd4e46deec902579099e61415fe54ae48de94022348de9"
+      "sha256": "4a00109b5b1d8ff80f8108109a08494edfefb62bbf3df2a3722dde899e4aeaab"
     },
     "settings.png": {
       "kind": "screenshot",
@@ -49,18 +49,18 @@
     },
     "native-session.png": {
       "kind": "screenshot",
-      "bytes": 96673,
+      "bytes": 96672,
       "width": 1400,
       "height": 800,
-      "sha256": "9e75d23b7a0bee6c52e6c86f010b9aab3df4b3d59d9545d785c6012741aa7367"
+      "sha256": "c06bcdfcea3abf9745330053c0ccedaa446d6250759457e082e86431b3780299"
     },
     "hero-terminal.cast": {
       "kind": "cast",
-      "bytes": 134282,
+      "bytes": 134196,
       "width": 140,
       "height": 40,
       "events": 6,
-      "sha256": "585f31c390fc2de84131c9a798da4ed6b512f9b6a9756f458efd86d3dc4727b1"
+      "sha256": "a3d1e79166a8ece654a43082ca83784dabe096acacc05ee10eb846b8aed7e630"
     }
   }
 }

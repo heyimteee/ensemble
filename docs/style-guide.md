@@ -73,7 +73,7 @@ Rules:
   by the glossary and evidence records.
 - Write `$Name` and `@path` in code formatting. They are syntax, not prose.
 - "Leader" is a role, not a permission level.
-- Use "stable" and the exact package version, for example `0.1.0`, in install
+- Use "stable" and the exact package version, for example `0.1.1`, in install
   instructions. Label prerelease history explicitly.
 
 ## Page template

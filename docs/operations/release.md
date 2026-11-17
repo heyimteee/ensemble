@@ -13,11 +13,11 @@ boundary, and the dry-run rehearsal. Use
 
 ## Current release
 
-`@heyimteee/ensemble@0.1.0` is the stable release, published from tag `v0.1.0`
+`@heyimteee/ensemble@0.1.1` is the stable release, published from tag `v0.1.1`
 and marked as a normal GitHub release, not a prerelease. npm dist-tags are
-`latest: 0.1.0` and `next: 0.1.0-rc.3`. The runtime is identical to
-`0.1.0-rc.3`; the stable promotion moves `latest` and release metadata. Pin the
-exact version for deliberate installs.
+`latest: 0.1.1` and `next: 0.1.0-rc.3`. This is a documentation and npm
+presentation patch; the runtime is identical to `0.1.0` (and to
+`0.1.0-rc.3`). Pin the exact version for deliberate installs.
 
 The historical `0.1.0-rc.2` release remains at tag `v0.1.0-rc.2` (release commit
 `ccd13eb`) as the first public prerelease. The release-candidate verification
@@ -32,7 +32,7 @@ Docs, and Node Matrix. Both 4-hour soaks, the full macOS checklist including
 and the [soak record](../verification/2026-11-17-soak.md). If any runtime
 source changes, rerun the clean-install proof before a future tag.
 
-The stable release notes are [Ensemble 0.1.0](release-notes-0.1.0.md); the
+The stable release notes are [Ensemble 0.1.1](release-notes-0.1.1.md); the
 historical prerelease notes and launch plan remain
 [rc.2](release-notes-0.1.0-rc.2.md) and [rc.2 launch
 plan](launch-plan-0.1.0-rc.2.md). The [release
@@ -130,7 +130,7 @@ absolute path.
 - npm refuses a prerelease without an explicit dist-tag. The preflight exports
   `next` for a version with a prerelease suffix and `latest` for a final
   release, and both publish jobs pass `--tag "$DIST_TAG"`. npm also requires a
-  `latest` tag and rejects deleting it (E400). Stable `0.1.0` owns `latest`;
+  `latest` tag and rejects deleting it (E400). Stable `0.1.1` owns `latest`;
   `0.1.0-rc.3` remains on `next`. Pin exact versions.
 - Never put a registry credential, token, tag message, or private path in a
   workflow file or issue.
@@ -165,8 +165,8 @@ missing export fails before any upload.
 ### Tagged release
 
 1. Approve the release and its notes, launch plan, and sign-off (#278). The
-   current published release is stable `0.1.0`; a later release bumps the patch
-   version and records its own notes. Do not move the `v0.1.0` tag.
+   current published release is stable `0.1.1`; a later release bumps the patch
+   version and records its own notes. Do not move the `v0.1.1` tag.
 2. Confirm `version` in `package.json` and `package-lock.json` agree; open the
    release pull request and let every required check pass.
 3. Merge to `main`, then tag the merge commit:

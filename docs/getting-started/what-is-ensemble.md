@@ -66,7 +66,7 @@ That empty state is the starting point for the [quickstart](quickstart.md).
 
 ## Next
 
-- [Install](install.md): add the stable `0.1.0` package.
+- [Install](install.md): add the stable `0.1.1` package.
 - [Quickstart](quickstart.md): create two agents, a workspace, and a first
   message.
 - [Concepts](../concepts/README.md): go deeper on the leader, work items,

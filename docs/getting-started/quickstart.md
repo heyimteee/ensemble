@@ -6,7 +6,7 @@ version: 0.1.x
 
 # Quickstart
 
-Install the stable `0.1.0` package, create two agents and a workspace, send one
+Install the stable `0.1.1` package, create two agents and a workspace, send one
 message, and watch the work item finish. The example uses an `acme-notes`
 workspace with two synthetic agents, `Nova` and `Rook`.
 
@@ -26,14 +26,14 @@ a human completion estimate; install and model latency vary by machine.
 ## Step 1: Install and verify
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.1
 opencode plugin list
 ```
 
 Expected entry:
 
 ```text
-ensemble.v2  0.1.0  @heyimteee/ensemble@0.1.0
+ensemble.v2  0.1.1  @heyimteee/ensemble@0.1.1
 ```
 
 If the entry is missing, restart OpenCode and run `opencode plugin list` again.

@@ -208,11 +208,12 @@ export const sidebar = [
     items: [
       { text: "Operations", link: "/operations/" },
       { text: "Backup and restore", link: "/operations/backup-restore" },
-      { text: "Upgrade to stable 0.1.0", link: "/operations/upgrade" },
+      { text: "Upgrade to stable 0.1.1", link: "/operations/upgrade" },
       { text: "Package rollback", link: "/operations/rollback" },
       { text: "Scale, soak, and diagnostics", link: "/operations/scale-and-monitoring" },
       { text: "Release operations", link: "/operations/release" },
       { text: "Release sign-off checklist", link: "/operations/release-signoff" },
+      { text: "Release notes 0.1.1", link: "/operations/release-notes-0.1.1" },
       { text: "Release notes 0.1.0", link: "/operations/release-notes-0.1.0" },
       { text: "Release history", link: "/operations/launch-plan-0.1.0-rc.2" },
       { text: "Release notes 0.1.0-rc.2", link: "/operations/release-notes-0.1.0-rc.2" },

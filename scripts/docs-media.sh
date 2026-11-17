@@ -119,7 +119,7 @@ sleep 0.6
 "$LIVE_TMUX_BIN" send-keys -t "$SHELL_SESSION" "export PS1='~ $ '" Enter
 "$LIVE_TMUX_BIN" send-keys -t "$SHELL_SESSION" clear Enter
 sleep 0.3
-"$LIVE_TMUX_BIN" send-keys -t "$SHELL_SESSION" "opencode plugin add @heyimteee/ensemble@0.1.0"
+"$LIVE_TMUX_BIN" send-keys -t "$SHELL_SESSION" "opencode plugin add @heyimteee/ensemble@0.1.1"
 sleep 0.5
 "$LIVE_TMUX_BIN" capture-pane -e -p -t "$SHELL_SESSION" >"$LIVE_BASE/frames/hero-install.ansi"
 "$LIVE_TMUX_BIN" kill-session -t "$SHELL_SESSION" 2>/dev/null || true

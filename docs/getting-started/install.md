@@ -1,12 +1,12 @@
 ---
 title: Install Ensemble
-description: Add the stable 0.1.0 package to OpenCode, verify the plugin list, and open the workspace.
+description: Add the stable 0.1.1 package to OpenCode, verify the plugin list, and open the workspace.
 version: 0.1.x
 ---
 
 # Install Ensemble
 
-Install the stable `0.1.0` package as one OpenCode plugin, confirm that OpenCode
+Install the stable `0.1.1` package as one OpenCode plugin, confirm that OpenCode
 reports it, and open the Ensemble workspace.
 
 ## Before you start
@@ -24,10 +24,10 @@ but it writes a runtime warning and its behavior is not supported.
 ## Install the plugin
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.1
 ```
 
-Pin the exact version. `0.1.0` is the stable release and the npm `latest` tag;
+Pin the exact version. `0.1.1` is the stable release and the npm `latest` tag;
 prereleases stay under `next`.
 
 ## Verify the plugin list
@@ -39,7 +39,7 @@ opencode plugin list
 Expected entry:
 
 ```text
-ensemble.v2  0.1.0  @heyimteee/ensemble@0.1.0
+ensemble.v2  0.1.1  @heyimteee/ensemble@0.1.1
 ```
 
 The line shows the plugin ID, the installed version, and the package source. If

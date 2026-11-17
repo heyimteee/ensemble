@@ -32,7 +32,7 @@ opencode plugin list
 A healthy install shows one entry:
 
 ```text
-ensemble.v2  0.1.0  @heyimteee/ensemble@0.1.0
+ensemble.v2  0.1.1  @heyimteee/ensemble@0.1.1
 ```
 
 Node must be 22.23.4 or newer, and OpenCode must be 2.2.6, 2.2.7, or 2.3.0.
@@ -49,7 +49,7 @@ success.
 2. Pin the exact stable version:
 
    ```sh
-   opencode plugin add @heyimteee/ensemble@0.1.0
+   opencode plugin add @heyimteee/ensemble@0.1.1
    ```
 
    Do not use a Git spec. On OpenCode 2.2.7, `github:`, `git+https://`, and
@@ -65,7 +65,7 @@ success.
 6. If you installed from a checkout, point `opencode.json` at the repository
    directory and remove any npm entry for the same package. Do not load both.
 
-**Expected result:** one package entry at `0.1.0`, and `ENSEMBLE │ no workspace`
+**Expected result:** one package entry at `0.1.1`, and `ENSEMBLE │ no workspace`
 or the selected workspace opens without a plugin failure. If the entry is still
 missing, collect the install command, the registry output, and the versions, then
 read the [support policy](README.md).

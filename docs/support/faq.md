@@ -11,7 +11,7 @@ failure. Each answer points to the page that owns the detail.
 
 ## Before you start
 
-- You know the stable package version: `0.1.0`.
+- You know the stable package version: `0.1.1`.
 - You have the [support matrix](support-matrix.md) open for platform and host
   claims. A combination outside it is unsupported, not a promised fix.
 - Support is best effort through GitHub Issues, as described in the
@@ -19,13 +19,13 @@ failure. Each answer points to the page that owns the detail.
 
 ## Which npm tag should I install?
 
-Install `0.1.0` on the `latest` tag and pin the exact version:
+Install `0.1.1` on the `latest` tag and pin the exact version:
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.1
 ```
 
-npm dist-tags for this release are `latest: 0.1.0` and `next: 0.1.0-rc.3`. The
+npm dist-tags for this release are `latest: 0.1.1` and `next: 0.1.0-rc.3`. The
 `next` tag is prerelease history; do not use it for a deliberate stable install.
 Do not write a floating `latest` in a shared instruction: pin the version so a
 later publish cannot change what a teammate installs.
@@ -36,8 +36,8 @@ Verify the registry state if you need to:
 npm view @heyimteee/ensemble dist-tags
 ```
 
-`latest` should name `0.1.0`. If it does not, stop and read the
-[release notes](../operations/release-notes-0.1.0.md) before installing.
+`latest` should name `0.1.1`. If it does not, stop and read the
+[release notes](../operations/release-notes-0.1.1.md) before installing.
 
 ## Do Git installs work?
 
