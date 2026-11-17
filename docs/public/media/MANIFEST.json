@@ -5,7 +5,7 @@
   "generator": "scripts/docs-media.sh",
   "capture": {
     "host": "OpenCode 2.3.0 with the local fake provider",
-    "terminal": "tmux 110x34, ENSEMBLE_REDUCED_MOTION=1",
+    "terminal": "tmux 140x40, ENSEMBLE_REDUCED_MOTION=1",
     "workspace": "synthetic Acme Notes fixture",
     "source": "isolated HOME, XDG config/data/state, and project under a temporary directory",
     "redaction": "the temporary project path is rendered as ~/dev/acme-notes",
@@ -14,53 +14,53 @@
   "assets": {
     "workspace-shell.png": {
       "kind": "screenshot",
-      "bytes": 72812,
-      "width": 1100,
-      "height": 680,
-      "sha256": "92745087efc6731a289e682c5da739ad6f1f63a9a46518898a5a7c6d07b07270"
+      "bytes": 86854,
+      "width": 1400,
+      "height": 800,
+      "sha256": "6b9793d3b3eb8614adda8cfc374aa9e690d54a64ddf04b42b581eae1d8b877aa"
     },
     "work-active.png": {
       "kind": "screenshot",
-      "bytes": 29638,
-      "width": 742,
-      "height": 510,
-      "sha256": "2a6d9138d86fa7ffb8e0ba3634dda4ea5924909ad90c6c7c155da101fd774a8d"
+      "bytes": 86854,
+      "width": 1400,
+      "height": 800,
+      "sha256": "6b9793d3b3eb8614adda8cfc374aa9e690d54a64ddf04b42b581eae1d8b877aa"
     },
     "work-history.png": {
       "kind": "screenshot",
-      "bytes": 34260,
-      "width": 742,
-      "height": 510,
-      "sha256": "904a9938a45b37e0d8b5d415e1bb6f5af6685f68280d91c50663002de588c407"
+      "bytes": 89380,
+      "width": 1400,
+      "height": 800,
+      "sha256": "9e1ae004667fcc93d23992ead35b838fc7297266de74c60d597ea3c317ab5a42"
     },
     "approvals.png": {
       "kind": "screenshot",
-      "bytes": 21684,
-      "width": 742,
-      "height": 510,
-      "sha256": "9976a1862d503e944f327dcfec9f479154094488a7e708be9743245919104523"
+      "bytes": 78119,
+      "width": 1400,
+      "height": 800,
+      "sha256": "6c546a28cd44206ec7fd4e46deec902579099e61415fe54ae48de94022348de9"
     },
     "settings.png": {
       "kind": "screenshot",
-      "bytes": 47161,
-      "width": 700,
-      "height": 930,
-      "sha256": "c5a40c52103a8c22933c85e12e2351e58b25baea26d960d980c14ac0386fe6e3"
+      "bytes": 77370,
+      "width": 1400,
+      "height": 800,
+      "sha256": "fdf00029934b89d9f018012a038f7a57da996f4471ba4b5ddbe9a3d153c8df10"
     },
     "native-session.png": {
       "kind": "screenshot",
-      "bytes": 59909,
-      "width": 1100,
-      "height": 680,
-      "sha256": "741d01efd9e1c44f2318546ad6ba315d23638be5f288e3ed93f8c70ef506da28"
+      "bytes": 96673,
+      "width": 1400,
+      "height": 800,
+      "sha256": "9e75d23b7a0bee6c52e6c86f010b9aab3df4b3d59d9545d785c6012741aa7367"
     },
     "hero-terminal.cast": {
       "kind": "cast",
-      "bytes": 98657,
-      "width": 110,
-      "height": 34,
+      "bytes": 134282,
+      "width": 140,
+      "height": 40,
       "events": 6,
-      "sha256": "9e6a148e0f807aec33e95e0974c1ca77303a7d876cc3e831ea928b50dfd42b74"
+      "sha256": "585f31c390fc2de84131c9a798da4ed6b512f9b6a9756f458efd86d3dc4727b1"
     }
   }
 }

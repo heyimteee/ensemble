@@ -21,8 +21,8 @@ memories, and the Skillbox; memory management has its own guide.
   src="/media/settings.png"
   alt="Ada's settings surface with General, Models, Memories, and Skillbox tabs, identity rows, model summary, and native-mirror toggle."
   caption="Agent settings open on General and stay a draft until you save. Press h or l to switch tabs; press j or k to move rows; press s to save."
-  width="700"
-  height="930"
+  width="1400"
+  height="800"
 />
 
 ## Steps

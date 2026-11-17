@@ -38,6 +38,7 @@ its tickets.
 
 ## Verification records
 
+- [Ticket #301 documentation acceptance](../verification/2026-11-17-ticket-301-acceptance.md): the five-minute human quickstart walkthrough, the heading-anchor and terminal-hero fixes, the full 185-route desktop/mobile/light/dark scan, zero axe violations, and the remaining external Pages/ruleset actions
 - [Ticket #301 final documentation review corrections](../verification/2026-11-17-ticket-301-review-fixes.md): rendered-site anchors from the VitePress renderer and built HTML crawl, stable-0.1.0 operations reconciliation, non-destructive synthetic media capture, dynamic privacy markers, fast/full docs CI split, Markdown lint, exact evidence links, terminology, and truthful README badges
 - [Documentation quality gates and quickstart audit](../verification/2026-11-17-ticket-310.md): the extended docs contract (inventory, frontmatter, links/anchors, fences, shell, canonical claims, reference, media, site build), the packed-install quickstart TUI E2E and 29.4 s timing, the docs/rationale PR guard, and the unrun human-usability limit
 - [Documentation visuals and accessibility](../verification/2026-11-17-ticket-309.md): the synthetic terminal replay and screenshots, rendered Mermaid diagrams with accessible titles/descriptions, manifest and alt/caption checks, keyboard/heading/contrast/reduced-motion measurements, and the remaining unrun browser and install limits

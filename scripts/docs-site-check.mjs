@@ -39,6 +39,7 @@ const REQUIRED_FILES = [
   "docs/.vitepress/theme/TerminalHero.vue",
   "docs/.vitepress/theme/custom.css",
   "docs/public/favicon.svg",
+  "docs/public/logo.svg",
   "docs/public/og-image.png",
   "docs/public/.nojekyll",
 ]

@@ -25,8 +25,11 @@ covers:
 - the old docs home (`/docs/`, `/docs/README.html`, `/docs.html`) to `/`;
 - section README and `.md`/`.html` forms such as
   `/getting-started/README.html` to `/getting-started/`;
-- `.html` forms of the section landing pages such as `/reference.html` to
-  `/reference/`.
+- the old docs home alias `/docs/` to `/`.
+
+Section landing pages are served from their directory routes
+(`/getting-started/`, `/reference/`). A separate `.html` alias is not emitted
+because it would shadow the real directory index on some static servers.
 
 The site build fails when a redirect target is not a built page or a redirect
 would overwrite a real page. See

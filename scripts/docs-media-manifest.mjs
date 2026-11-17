@@ -70,7 +70,7 @@ const manifest = {
   generator: "scripts/docs-media.sh",
   capture: {
     host: "OpenCode 2.3.0 with the local fake provider",
-    terminal: "tmux 110x34, ENSEMBLE_REDUCED_MOTION=1",
+    terminal: "tmux 140x40, ENSEMBLE_REDUCED_MOTION=1",
     workspace: "synthetic Acme Notes fixture",
     source: "isolated HOME, XDG config/data/state, and project under a temporary directory",
     redaction: "the temporary project path is rendered as ~/dev/acme-notes",

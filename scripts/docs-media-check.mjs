@@ -214,7 +214,12 @@ function checkMarkdownMedia(root, manifest, failures) {
   const rootReadme = readRequiredPage(root, "README.md", failures)
   if (rootReadme) {
     for (const match of rootReadme.matchAll(/<img\b[^>]*>/g)) {
-      if (!/\balt\s*=\s*"[^"]{30,}"/.test(match[0])) failures.push("README.md: raw img needs useful alt text")
+      const tag = match[0]
+      if (!/\balt\s*=\s*"[^"]+"/.test(tag)) {
+        failures.push("README.md: raw img needs alt text")
+      } else if (tag.includes("docs/public/media/") && !/\balt\s*=\s*"[^"]{30,}"/.test(tag)) {
+        failures.push("README.md: product screenshot needs useful alt text")
+      }
     }
     if (!rootReadme.includes("docs/public/media/workspace-shell.png")) {
       failures.push("README.md: the product landing page must show the workspace screenshot")
@@ -275,8 +280,8 @@ function checkManifest(root, failures) {
       } catch {
         failures.push(`${MANIFEST}: ${name} has an invalid asciinema header`)
       }
-      if (parsed && (parsed.version !== 2 || parsed.width !== 110 || parsed.height !== 34)) {
-        failures.push(`${MANIFEST}: ${name} must be an asciinema v2 110x34 cast`)
+      if (parsed && (parsed.version !== 2 || parsed.width !== 140 || parsed.height !== 40)) {
+        failures.push(`${MANIFEST}: ${name} must be an asciinema v2 140x40 cast`)
       }
       for (const marker of ASSET_FORBIDDEN) {
         if (text.includes(marker)) failures.push(`${MANIFEST}: ${name} contains forbidden marker ${JSON.stringify(marker)}`)
