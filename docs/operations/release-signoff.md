@@ -123,8 +123,8 @@ the only published version.
 - [ ] One host turn registered the six native Ensemble tools.
 - [ ] The TUI loaded the Ensemble route and the `/ensemble` command.
 - [ ] The record for this version is linked from
-      [the verification index](../README.md), and its environment, commands,
-      passes, and blocked checks are recorded.
+      [the evidence index](../contributing/evidence.md#verification-records), and
+      its environment, commands, passes, and blocked checks are recorded.
 - [ ] The same install path is scheduled or completed on macOS/Herdr (#277); a
       blocked macOS run is recorded as blocked, not passed.
 

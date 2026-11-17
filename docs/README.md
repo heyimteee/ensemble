@@ -1,122 +1,124 @@
-# Documentation
+# Ensemble documentation
 
-## Product
+Ensemble is a persistent agent team inside OpenCode: one group chat, named
+agents, visible work, and each agent's native session underneath. These docs
+help you install it, learn the mental model, complete common tasks, and look up
+exact behavior.
 
-- [Project overview](../README.md)
-- [Changelog](../CHANGELOG.md): release history, including the published `0.1.0-rc.2` prerelease; the tag-driven workflow uses the matching version section as the GitHub release body
-- [Domain glossary](../GLOSSARY.md)
-- [Implementation and acceptance notes](implementation.md)
-- [Scale, soak, and local diagnostics](operations/scale-and-monitoring.md): operating envelope, soak/leak harness, support bundle, and no-telemetry policy
-- [v2 product specification #17](https://github.com/heyimteee/ensemble/issues/17): workspace group chat, subtasks, leader routing, and native-session drill-down
-- [v2 implementation tickets #18–#29](https://github.com/heyimteee/ensemble/issues): independently verifiable slices with blockers
-- [Historical v1 specification #1](https://github.com/heyimteee/ensemble/issues/1)
-- [OpenCode host support range](compatibility/opencode-host-range.md): supported CLI releases, peer range, runtime warning, and CLI-to-API mapping
-- [OpenCode 2.2.1 compatibility report](compatibility/opencode-2.2.1.md): historical extension behavior, constraints, and gaps
+**Version scope:** stable `0.1.x`, current **v7 roster contract**. Verified on
+OpenCode **2.2.6**, **2.2.7**, and **2.3.0** on Linux/tmux, with Node 22.23.4
+or newer. Prerelease history lives in the [changelog](../CHANGELOG.md), not in a
+separate docs tree.
 
-GitHub Issues are the authoritative location for the specification and tickets; avoid maintaining a competing copy of acceptance criteria here. Publishing the plan does not authorize implementation. Start with compatibility ticket #2 and only begin a ticket when its blockers are complete.
+## Start here
 
-## Working agreements
+| I want to… | Start with |
+|---|---|
+| Install Ensemble and get a first reply | [Getting started](getting-started/README.md) |
+| Understand agents, workspaces, and routing | [Concepts](concepts/README.md) |
+| Finish a task in the app | [Guides](guides/README.md) |
+| Look up a command, key, tool, or setting | [Reference](reference/README.md) |
+| Back up, upgrade, or recover an install | [Operations](operations/README.md) |
+| Assess security or privacy | [Security](security/README.md) or [Privacy](privacy/README.md) |
+| Get help or report a problem | [Support](support/README.md) |
+| Contribute code or documentation | [Contributing](contributing/README.md) |
 
-- [ADR index](adr/README.md): every accepted architecture decision
-- [ADR 0001: Native-skill boundary](adr/0001-native-skill-boundary.md): why Ensemble routes native skills instead of executing them
-- [ADR 0009: Conversation identity and sessions](adr/0009-conversation-identity-and-sessions.md): one native session per agent per conversation, adoption, and isolation
-- [ADR 0010: Native turn ingestion](adr/0010-native-turn-ingestion.md): service-owned, identity-based messages and Work
-- [ADR 0011: Mention routing and budgets](adr/0011-mention-routing-and-budgets.md): `$Name` grammar, sanitization, server-owned budgets, and the v7 roster contract
-- [Agent instructions](../AGENTS.md)
-- [Handoff contract](agents/handoff.md): server-owned completion, migration handoff, batch-review, loop-guard, and mention rules
-- [OpenCode/OpenTUI runtime guide](agents/opencode-tui-runtime.md): host contracts, source navigation, and verification
-- [Issue tracker](agents/issue-tracker.md)
-- [Labels](agents/triage-labels.md)
-- [Review workflow](agents/review-workflow.md)
-- [Reviewer standards](agents/review-standards.md): judgement calls only; mechanical rules stay in automated checks
-- [Domain document conventions](agents/domain.md)
-- [Contributing](../CONTRIBUTING.md)
-- [Security policy](../SECURITY.md)
-- [Threat model](security/threat-model.md): storage, filesystem/shell, tools, cross-workspace access, skills, approvals, model fallback, and logs, with code evidence
-- [Permission-model review](security/permission-model-review.md): approvals, outside-roster contact, external directories, self-approval, and native permission preservation
-- [Accepted risks](security/accepted-risks.md): dependency advisories and residual risks with review dates
-- [Data classes, retention, export, and delete](privacy/data-and-retention.md): what Ensemble stores, the 24-hour Work and 7-day log retention, the `ensemble.data-export` format, the scoped delete path, and the v7 `AGENTS.md` roster disclosure guidance and manual opt-out
+## Learning paths
 
-## Support
+### New users
 
-- [Support policy](support/README.md): channel, response expectations, evidence, and redaction rules
-- [Incident runbook](support/incident-runbook.md): symptoms, diagnostics, package rollback, escalation, and data recovery
-- [Support matrix and known limitations](support/support-matrix.md): Linux/tmux, macOS/Herdr, Windows, OpenCode/Node ranges, and live-suite prerequisites
+1. Read [What is Ensemble?](getting-started/what-is-ensemble.md) and check the
+   [support matrix](support/support-matrix.md) before you install on an
+   unverified host.
+2. Follow [Install](getting-started/install.md) for the stable `0.1.0` package.
+3. Complete the [Quickstart](getting-started/quickstart.md): two agents, one
+   workspace, one message, and one finished work item.
+4. Continue with [First team](getting-started/first-team.md) to delegate work
+   and open a native session.
+5. Use [Upgrade](getting-started/upgrade.md) when you move from a prerelease.
 
-## Operations
+### Daily users
 
-- [Backup and restore](operations/backup-restore.md): the durable-state document, RPC actions, the operator CLI, the automatic rollback slot, and failure recovery
-- [Upgrade from the pre-release](operations/upgrade.md): native-first defaults, AGENTS v7, the native-state refactor, and additive durable-state migrations
-- [Package rollback](operations/rollback.md): package-only and state rollback, plus the rehearsed failure path
-- [Release operations](operations/release.md): the tag-driven workflow, the token-free dry run, main protection and its 12 real check contexts, OIDC trusted publishing, provenance, the SBOM, and the changelog-based GitHub release
-- [Release notes for 0.1.0](operations/release-notes-0.1.0.md): the stable 0.x release, install/upgrade/rollback path, verification, support route, and known limitations
-- [Release notes for 0.1.0-rc.2](operations/release-notes-0.1.0-rc.2.md): the published-prerelease notes, public install smoke, install/upgrade/rollback path, support route, npm `latest` caveat, and known limitations
-- [Launch plan for 0.1.0-rc.2](operations/launch-plan-0.1.0-rc.2.md): audience, channels, support path, rollback triggers, and the completed publish sequence; the announcement remains separate
-- [Release sign-off checklist](operations/release-signoff.md): the completed released sign-off for `0.1.0-rc.2`, including the public install smoke, npm `latest` caveat, provenance, GitHub release, and the reusable pre-tag gate for a future release
+1. Learn the shared language in [Concepts](concepts/README.md) and the
+   [domain glossary](../GLOSSARY.md).
+2. Use [Guides](guides/README.md) for routing, the Work pane, approvals, and
+   settings.
+3. Keep the [keyboard reference](../README.md#keyboard) open while you work.
+4. Look up exact behavior in [Reference](reference/README.md) when a guide is not
+   enough.
 
-## Verification
+### Team leads
 
-- [Public release readiness — parent #268](verification/2026-11-17-ticket-268.md): the released `0.1.0-rc.2` state, every child ticket result including #277 macOS verification and #281–#287, the final-tip install/fake/soak evidence, green required CI at `a7f1eb3`, the full macOS checklist including 1.7, the public-registry smoke on 2.2.7/2.3.0, npm `latest`/`next` behavior, and the remaining announcement decision
-- [Live TUI readiness after opening Ensemble](verification/2026-11-17-ticket-287.md): statusline-gated `live_open_ensemble`, a header-only guard test, the deterministic command-line retype ordering, and passing 2.3.0/2.2.7 fake suites
-- [OpenTUI 0.8 / Solid 1.9 TUI stack upgrade](verification/2026-11-17-ticket-296.md): the coordinated runtime bump, Node 22/26 installs, verify, fake E2E, size matrix, pack contents, and the remaining macOS render check
-- [Four-hour enforced soak — 0.1.0-rc.2 final tip](verification/2026-11-17-soak.md): PASS on both supported hosts, OpenCode 2.2.7 and 2.3.0, with 240 samples over 14,439 s each, 0 failures, settled queue/native state, and growth within both gates
-- [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence
-- [OpenCode 2.3.0 compatibility](verification/2026-11-17-ticket-286.md): the host-range expansion, the 2.3.0 and 2.2.7 fake E2E runs, the passing host probe, the high-contrast focus-tone harness fix, the size matrix, and the loopback install proof
-- [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
-- [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
-- [Clean-install release candidate](verification/2026-11-16-ticket-270.md): the loopback-registry `opencode plugin add` proof, the installed server tools and package source, and the exact TUI source-package load failure deferred to #279
-- [Built package for the installed TUI plugin](verification/2026-11-16-ticket-279.md): the Solid-compiled `dist` build, runtime dependency resolution in the plugin cache, the passing `0.1.0-rc.2` TUI route and `/ensemble` command, and the runtime-only pack guard
-- [macOS/Herdr verification via SSH](verification/2026-11-16-ticket-277.md): the macOS `0.1.0-rc.2` install and six server tools, the installed TUI route in Herdr/Ghostty, the full checklist including 1.7 pane-bounded Shift+drag with explicit copy, the macOS fake E2E, and the Git-spec/Herdr-prefix findings
-- [Security and privacy audit](verification/2026-11-16-ticket-271.md): threat model and permission review, the handoff symlink containment fix, `npm audit` baseline and accepted risks, Dependabot configuration, and the passing verify/docs gates
-- [Backup/restore and upgrade/rollback](verification/2026-11-16-ticket-273.md): the versioned backup document, the service RPC and operator CLI, the automatic rollback slot, the injected-failure recovery rehearsal, restored-state doctor compatibility, and the upgrade/rollback guides
-- [Scale/soak and local diagnostics](verification/2026-11-16-ticket-276.md): the fake soak harness, the tested operating envelope, the redacted support bundle, the no-telemetry policy, and the settled native-session cap fix; the final-tip 4-hour result is in the [soak record](verification/2026-11-17-soak.md)
-- [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
-- [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
-- [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix
-- [Full deterministic E2E in CI](verification/2026-11-16-ticket-261.md): cost-split PR jobs, nightly latency and opt-in real-model jobs, failure artifacts, the OpenCode 2.2.7 pin, the job-graph checker, and the passing deterministic matrix
-- [Documentation freshness](verification/2026-11-12-ticket-262.md): canonical contract/host/Node constants, the docs index, ADR 0011 at contract v7, and the `docs:check` CI gate
-- [Data retention, export, delete, and roster disclosure](verification/2026-11-16-ticket-272.md): the `data.export`/`data.delete` RPC actions and CLI, the documented retention and export format, post-delete workspace health, log deletion, and the v7 `AGENTS.md` title/role disclosure guidance
-- [Live harness flake policy](verification/flake-policy.md): timing-only retry, flake budget, failure artifacts, and the issue/owner quarantine rule
-- [Live harness flake policy verification](verification/2026-11-12-ticket-256.md): readiness-based wizard alignment, classified timing retry, artifact preservation, and the passing deterministic matrix
-- [Latency budget and SLO](verification/latency-budget.md): split rail/patch-card/first-token metrics, reference and smoke profiles, the deterministic patch-card fixture, and the deliberate regression gate
-- [Latency budget verification](verification/2026-11-16-ticket-260.md): baseline samples, reference-host gate, regression evidence, and the verify/latency results
-- [Node support policy and CI matrix](verification/2026-11-12-node-matrix.md): `npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1, the `>=22.23.4` engine floor, the load-time version gate, and the separate Node matrix workflow
-- [Accessibility audit](verification/2026-11-12-ticket-259.md): contrast matrix for dark/light/custom themes, non-color Work status, keyboard-only reachability, reduced-motion/`NO_COLOR`/ASCII fallbacks, and the ASCII glyph fix
-- [Terminal accessibility checklist](verification/terminal-accessibility-checklist.md): manual screen-reader, high-contrast, font-scaling, reduced-motion, ASCII, keyboard-only, and host-limit checks
-- [OpenCode peer compatibility matrix](verification/2026-11-12-ticket-257.md): supported 2.2.6/2.2.7 hosts, peer range, runtime warning, and local verify/probe evidence
-- [Vera regression and cutover verification](verification/2026-11-11-ticket-241.md): unset-store default-on restart, one leader turn with explicit delegation plus multi-mention routing without duplicates, no completion bounce, exact generated roster table, one-card-per-row size matrix, rollback/restore durability, and the measured AGENTS block delta
-- [Native-first default on and rollback](verification/2026-11-11-ticket-240.md): persisted default, explicit off/shadow, tool-surface rollback, global commands, restart requirement, and the passing live matrix
-- [Contract v6 and team roster](verification/2026-11-11-ticket-238.md): native-first rules, generated roster table, content-aware reconciliation, refresh triggers, and the measured prompt delta
-- [Contract v7 terminal-turn workflow](verification/2026-11-12-ticket-253.md): root-only synthesis, terminal-turn references, `ensemble_dispatch` continuation, regenerated repository block, and the passing Vera regression
-- [Native-first full E2E](verification/2026-11-12-e2e.md): all 12 unit/live suites passing on OpenCode 2.2.7, including the real TUI acceptance
-- [Native ingestion state and AGENTS v7 full E2E](verification/2026-11-12-native-ingestion-v7-e2e.md): the 13-suite matrix on OpenCode 2.2.7 covering native ingestion, the v7 terminal-turn contract, Vera, accessibility sizes, and the real TUI
-- [One native ingestion state value](verification/2026-11-12-ticket-231.md): one `NativeSessionState` per session, event order, steering, retry, interruption, adoption, and restart
-- [Terminal turns and root-only synthesis E2E](verification/2026-11-11-terminal-turns-e2e.md): root synthesis, intermediate relay, terminal-turn references, dispatch continuation, and the passing full live matrix
-- [Native probe version set and stale live harness](verification/2026-11-11-ticket-233-234.md): 2.2.6/2.2.7 contract set, Native mirror settings row, and Work interaction before HISTORY
-- [Native-first review fixes](verification/2026-11-11-review-fixes.md): privacy toggle, recovered attachment chips, adoption race guard, kill-switch tool path, shadow delta, parallel ingestion, delegated prompt context, and standards cleanup
-- [Native-first cutover verification](verification/2026-11-11-native-first.md): passing live matrix for direct/workspace turns, mention routing, attachments, adoption, retry/interruption, restart/reconnect, Work history, rollback, shadow comparison, latency, and tokens
-- [Native shadow mode](verification/2026-11-11-ticket-230.md): invisible shadow ingestion, content-free comparison rows, no visible writes or routes, and the passing 65/65 + 16/16 live matrix
-- [Native prompt attachment size](verification/2026-11-11-ticket-228.md): host `data` payload derives a bounded positive chip size; live attachment check passes
-- [Native-first child-ticket evidence index](verification/2026-11-11-native-first-children.md): where each #210–#230 verification lives
-- [Retry and interruption for native turns](verification/2026-11-11-ticket-217.md): one durable turn and Work card across retry, interruption, and settlement
-- [Native reconciliation and support surface](verification/2026-11-11-ticket-218.md): reconciliation triggers, context reads, and support-surface limits
-- [Legacy direct-message transcript contract](verification/2026-11-11-ticket-226.md): one conversation-channel store for direct messages and the retired per-binding branch
-- [Compact synthesis context](verification/2026-11-11-ticket-249.md): root synthesis without the bounded group transcript
-- [Multi-ticket and token verification](verification/2026-11-11-ticket-251.md): multi-ticket roots, command-cap refusal, prompt/schema token counts, and the Vera regression
-- [Native host event contract](verification/2026-11-10-native-host-contract.md): measured OpenCode 2.2.6 order, identities, retry, interruption, background subagent, and move behavior
-- [Composer attachments](verification/2026-11-10-ticket-223.md): path and clipboard-image paste, bounded store, prompt files, transcript chips, cleanup, and terminal limits
-- [Direct native turn ingestion](verification/2026-11-10-ticket-215.md): direct durable messages, exact settlement, Work card, restart recovery, and the nativeFirst rollback
-- [Workspace native turn ingestion](verification/2026-11-11-ticket-216.md): workspace group messages, implicit addressee, subagent children, isolation, bounded stream checkpoints, and the #215 review fixes
-- [Immediate prompt after adoption](verification/2026-11-11-ticket-229.md): steered multi-turn executions settle each participating turn with its own exact row
-- [Tool retirement and contract shrink](verification/2026-11-11-ticket-225.md): native vs legacy tool surfaces, per-turn context injection, measured prompt/schema reduction, and the one-release rollback
-- [Real live workspace-wizard timeout](verification/2026-11-11-ticket-232.md): pane-selection harness sequence, viewport-independent real assertions, and a passing `npm run test:live`
-- [macOS/Herdr manual checklist](verification/macos-herdr-checklist.md): repeatable, manual, and unexecuted until a run is recorded
-- [v6 verification](verification/2026-11-07-v6.md): nine-scene motion parity, Work-card size matrix, load probe, reduced motion, and `NO_COLOR`
-- [v5.9 verification](verification/2026-11-06-v59.md): live-matrix guardrails, CI, reviewer standards, unused checks, and tracker hygiene
-- [v5.8 verification](verification/2026-11-05-v58.md): System Agent init and deliberate skill invocation
-- [v5.7 verification](verification/2026-11-05-v57.md): persistent modes, native key ownership, and interaction polish
-- [v5.6 verification](verification/2026-11-05-v56.md): modal interactions, composer editing, mouse copy, and statusline
+1. Read [Concepts](concepts/README.md) for the leader, group chat, turns, work
+   items, and dispatch budgets.
+2. Follow [Guides](guides/README.md) to create a workspace, add members, and
+   delegate work.
+3. Look up exact limits and commands in [Reference](reference/README.md) when a
+   delegation is refused or an agent stops.
+4. Review [support and operations](support/README.md) before asking a team to
+   depend on the preview.
 
-## Architecture status
+### Operators
 
-The developer preview uses a server plugin for state, scheduling, native sessions, RPC, and tools; a TUI plugin for the workspace; and OpenCode plugin storage for durable JSON state. See [Implementation](implementation.md). Add an ADR when a significant, hard-to-reverse trade-off changes this structure.
+1. Start at [Operations](operations/README.md) for backup, restore, upgrade, and
+   rollback.
+2. Read [Scale, soak, and local diagnostics](operations/scale-and-monitoring.md)
+   for the tested envelope and evidence collection.
+3. Use the [incident runbook](support/incident-runbook.md) when a workspace is
+   broken, work is stuck, or data may be lost.
+4. Follow the [support policy](support/README.md) and
+   [support matrix](support/support-matrix.md) before filing.
+
+### Contributors
+
+1. Start with [Contributing](contributing/README.md),
+   [CONTRIBUTING.md](../CONTRIBUTING.md), and [AGENTS.md](../AGENTS.md).
+2. Read the [documentation style guide](style-guide.md) before adding or moving a
+   page.
+3. Update the [redirect map](redirects.md) when navigation changes.
+4. Find architecture decisions and verification evidence in the
+   [evidence index](contributing/evidence.md), reached through the contributing
+   hub.
+
+### Security reviewers
+
+1. Start at [Security](security/README.md) for the threat model, permission
+   review, and accepted risks.
+2. Read [Privacy](privacy/README.md) for data classes, retention, export, and
+   delete.
+3. Follow the private reporting process in [SECURITY.md](../SECURITY.md). Never
+   put a vulnerability in a public issue.
+
+## Documentation sections
+
+| Section | Covers |
+|---|---|
+| [Getting started](getting-started/README.md) | Install, first run, quickstart, and the first team |
+| [Concepts](concepts/README.md) | Agents, workspaces, leader, conversations, turns, work items, budgets, native sessions, skills, memory, and approvals |
+| [Guides](guides/README.md) | Task-shaped walkthroughs and recipes |
+| [Reference](reference/README.md) | Tools, commands, keyboard, configuration, environment, files, CLI, and supported hosts |
+| [Operations](operations/README.md) | Backup, restore, upgrade, rollback, release operations, and diagnostics |
+| [Security](security/README.md) | Threat model, permission review, and accepted risks |
+| [Privacy](privacy/README.md) | Data classes, retention, export, and delete |
+| [Support](support/README.md) | Support policy, incident runbook, support matrix, and known limitations |
+| [Contributing](contributing/README.md) | Development workflow, docs process, ADRs, and verification evidence |
+
+Operations, security, privacy, and support are user-facing sections. ADRs,
+verification records, implementation notes, and assessments are public
+engineering evidence: they stay linked from the [contributing hub](contributing/README.md)
+and its [evidence index](contributing/evidence.md), not from the primary user
+navigation.
+
+## About these docs
+
+- [Documentation style guide](style-guide.md): voice, terminology, page
+  template, code samples, and visual rules.
+- [Redirect map](redirects.md): where entries from the old documentation index
+  moved.
+- [Domain glossary](../GLOSSARY.md): the authoritative definitions behind the
+  canonical terms.
+- [Changelog](../CHANGELOG.md): stable and prerelease history.
+
+`npm run docs:check` validates the current contract, host, and Node claims,
+keeps every docs section reachable from this home, and requires every current
+verification record to be linked from the evidence index.
