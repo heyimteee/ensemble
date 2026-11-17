@@ -3,8 +3,9 @@
 This page is the support boundary for the public preview. A supported
 combination has test evidence in this repository. An unverified combination may
 work, but it is not a support claim. A skipped or blocked check is not a pass.
-The macOS/Herdr run is recorded in #277; manual check 1.7 remains pending and
-is not a support claim.
+The macOS/Herdr run is recorded in #277; the full manual checklist, including
+1.7 mouse selection, passes on 2.2.7. Automatic copy-on-release is a host
+preference and is not claimed.
 
 If a platform or version is outside this matrix, the issue may be closed as out
 of scope with a pointer here. See the [support policy](README.md) for the
@@ -15,7 +16,7 @@ channel and response expectations.
 | Platform | Status | Evidence | Notes |
 |---|---|---|---|
 | Linux with tmux | **Supported** | [Production-readiness partials E2E](../verification/2026-11-16-prod-partials-e2e.md), the deterministic fake suites, and the real TUI acceptance | The tested terminal host is tmux 3.5a on Linux. Other terminals on Linux are untested. |
-| macOS with Herdr | **Supported for the installed path on OpenCode 2.2.7; 1.7 pending** | [macOS/Herdr record](../verification/2026-11-16-ticket-277.md) | Installed `0.1.0-rc.2` on OpenCode 2.2.7, six server tools, TUI route in Herdr/Ghostty, checklist except 1.7, and the fake E2E pass. Mouse drag 1.7 was **NOT RUN**; no selection/copy claim. Herdr prefix ownership is inconclusive host evidence. OpenCode 2.3.0 on macOS is not claimed. |
+| macOS with Herdr | **Supported for the installed path on OpenCode 2.2.7** | [macOS/Herdr record](../verification/2026-11-16-ticket-277.md) | Installed `0.1.0-rc.2` on OpenCode 2.2.7, six server tools, TUI route in Herdr/Ghostty, full checklist, and the fake E2E pass. 1.7 passed with a pane-bounded Shift+drag and explicit copy; automatic copy-on-release is not claimed. Herdr prefix ownership is inconclusive host evidence. OpenCode 2.3.0 on macOS is not claimed. |
 | Windows | **Out of scope** | None | Native Windows is not tested and is not a supported platform. Do not assume PowerShell, WSL, or a Windows terminal behaves like the Linux path. |
 | Other Unix-like hosts | **Untested** | None | No support claim. |
 
@@ -84,9 +85,11 @@ symptom through the [support policy](README.md) if it is not listed.
   MIT license. The built `0.1.0-rc.2` candidate passes the isolated
   `opencode plugin add` checks but is not published to a registry yet. See the
   [release notes](../operations/release-notes-0.1.0-rc.2.md).
-- **macOS mouse drag is not verified.** Manual checklist item 1.7 was not run;
-  selection and drag-copy behavior are not claimed. Cmd+C/Cmd+V passed. Herdr
-  prefix control is inconclusive host evidence, not a checklist failure.
+- **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
+  passed with a pane-bounded Shift+drag and explicit copy. Ghostty
+  `copy-on-select` is off, so a drag alone does not copy; this is a host
+  preference. Cmd+C/Cmd+V also passed. Herdr prefix control is inconclusive
+  host evidence, not a checklist failure.
 - **Windows is out of scope.** WSL is untested and is not a substitute for
   Linux/tmux evidence.
 - **Git-spec installs fail upstream in OpenCode 2.2.7.** `github:` and
@@ -115,7 +118,8 @@ symptom through the [support policy](README.md) if it is not listed.
   Ensemble's route gate prevents stale key ownership but cannot force the host
   to dispose them.
 - **Terminal accessibility is host-dependent.** Screen-reader output, high
-  contrast, font scaling, and mouse drag-copy are host features. Ensemble
+  contrast, font scaling, and automatic mouse copy-on-release are host
+  features. Ensemble
   supplies glyph-and-word status, reduced motion, `NO_COLOR`, and ASCII
   fallbacks; see the [accessibility checklist](../verification/terminal-accessibility-checklist.md).
 

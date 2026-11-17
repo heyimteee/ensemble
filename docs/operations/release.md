@@ -25,8 +25,11 @@ passed at `b194b95`; see the
 [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence)
 and the [soak record](../verification/2026-11-17-soak.md). Required CI at
 `a7f1eb3` is green on the first attempt with no job rerun: Verify,
-Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix. If any
-runtime source changes, rerun the clean-install proof before tagging.
+Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix. The
+full macOS checklist including 1.7 is PASS (closed #277 at `7efd9a6`);
+automatic copy-on-release is not claimed. All verification gates are complete,
+and the candidate is ready for publish approval. If any runtime source changes,
+rerun the clean-install proof before tagging.
 
 See the [release notes](release-notes-0.1.0-rc.2.md), [launch
 plan](launch-plan-0.1.0-rc.2.md), [candidate

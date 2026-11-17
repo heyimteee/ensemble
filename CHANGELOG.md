@@ -50,7 +50,9 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 - A repeatable fake soak harness, a redacted local support bundle, and an
   explicit no-telemetry/local-diagnostics policy. (#276)
 - macOS/Herdr verification of the installed package through SSH: install, TUI
-  route, fake E2E, and the manual checklist except mouse drag 1.7. (#277)
+  route, fake E2E, and the full manual checklist including 1.7 pane-bounded
+  Shift+drag with explicit copy. Automatic copy-on-release is not claimed.
+  (#277)
 - OpenCode 2.3.0 support: the supported range is now
   `2.2.6 || 2.2.7 || 2.3.0`, the compatibility matrix and required context
   include 2.3.0, and the Linux checks pass (host probe 14/14, size matrix,
@@ -62,8 +64,8 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 - The published package ships compiled `dist/` JavaScript instead of raw
   TypeScript; `prepack` builds and typechecks the runtime closure. The tarball
   contains only `package.json`, `README.md`, `LICENSE`, and `dist/`.
-- macOS/Herdr is verified for the installed path, with one manual check still
-  pending (mouse drag, 1.7).
+- macOS/Herdr is verified for the installed path, including the full manual
+  checklist. Mouse selection 1.7 requires Shift+drag and an explicit copy.
 
 ### Fixed
 
@@ -116,7 +118,11 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 - The deterministic fake and native E2E matrices on OpenCode 2.2.6 and 2.2.7.
 - The Node 22.23.4, 24.22.1, and 26.12.1 unit/typecheck matrix.
 - The installed `0.1.0-rc.2` package on Linux (loopback registry) and macOS
-  (Herdr/Ghostty), including the six server tools and the TUI route.
+  (Herdr/Ghostty), including the six server tools, the TUI route, and the full
+  macOS checklist. 1.7 passed with a pane-bounded Shift+drag over the composer
+  marker and an explicit `copy_to_clipboard`; the statusline stayed
+  `INSERT │ COMPOSER │ Group chat`, and mode/focus were unchanged. Automatic
+  copy-on-release is not claimed because Ghostty `copy-on-select` is off.
 
 ### Known limitations
 
@@ -124,8 +130,10 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
   announcement are pending human approval. This section is a candidate note,
   not a launch announcement.
 - **Windows is out of scope.** Native Windows and WSL are untested.
-- **macOS mouse drag is not claimed.** Checklist item 1.7 was not run; no
-  selection/copy behavior is verified. Cmd+C/Cmd+V passed.
+- **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
+  passed with a pane-bounded Shift+drag and explicit copy. Ghostty
+  `copy-on-select` is off, so a drag alone does not copy; this is a host
+  preference. Cmd+C/Cmd+V passed.
 - **Herdr prefix control is inconclusive.** The host test did not produce a tab
   or pane; no Ensemble key was observed to be intercepted, but the host-level
   claim is not proven.

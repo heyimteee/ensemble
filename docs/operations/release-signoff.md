@@ -32,18 +32,23 @@ or blocked item is not a pass.
 | Live TUI readiness (#287) | **PASS** | [record](../verification/2026-11-17-ticket-287.md), [CI section](../verification/2026-11-17-ticket-268.md#required-ci-at-a7f1eb3) | Fixed the harness false positive after Backspace (`:setting` → retype `s` → `:settings` restored) and header-only readiness. `live_open_ensemble` waits for the statusline and configured geometry; retype waits for `:settings` to disappear. No product runtime change; 2,121 tests; CI green. |
 | Clean install (#270, #279) | **PASS** | [parent #268 final-tip evidence](../verification/2026-11-17-ticket-268.md#final-tip-evidence), [built-package record](../verification/2026-11-16-ticket-279.md), [macOS record](../verification/2026-11-16-ticket-277.md) | Final-tip `a0c39c0` install through `opencode plugin add` into isolated OpenCode 2.2.7 / Node 26.12.1: PASS; 507,907 bytes; six native tools, TUI route, and `/ensemble` loaded. The earlier `b194b95` install passed at 124 runtime files and 507,824 bytes. Still a loopback registry, not public npm; a public-registry smoke of the final tagged build is pending. The `0.1.0-rc.1` TUI failure is superseded, not hidden. |
 | Built package (#280) | **PASS** | [built-package record](../verification/2026-11-16-ticket-279.md) | Solid-compiled `dist` server/TUI/RPC entries; runtime dependencies resolve from the plugin cache; pack guard passes. |
-| macOS/Herdr (#277) | **PASS except 1.7 PENDING** | [macOS record](../verification/2026-11-16-ticket-277.md) | Installed package, six server tools, Herdr/Ghostty TUI route, checklist except 1.7, fake E2E and size matrix. Mouse drag 1.7 was **not run** and is not claimed. Herdr prefix control is inconclusive host evidence. |
+| macOS/Herdr (#277) | **PASS** | [macOS record](../verification/2026-11-16-ticket-277.md) | Installed package, six server tools, Herdr/Ghostty TUI route, full manual checklist including 1.7 pane-bounded Shift+drag with explicit `copy_to_clipboard`, fake E2E and size matrix. No checklist item unrun. Automatic copy-on-release is not claimed (Ghostty `copy-on-select` off); Herdr prefix control is inconclusive. Closed at `7efd9a6`. |
 | Regression fixes (#281–#284) | **PASS** | [macOS record](../verification/2026-11-16-ticket-277.md) | Init interruption restore, `NO_COLOR` Work and transcript suppression, and durable Work feed reconstruction were re-verified on macOS. |
 | Scale, soak, and no telemetry (#276) | **PASS for 4h on OpenCode 2.2.7 and 2.3.0** | [soak record](../verification/2026-11-17-soak.md), [record](../verification/2026-11-16-ticket-276.md), [scale policy](scale-and-monitoring.md) | Enforced 4-hour soak at `b194b95`: PASS on both supported hosts. 2.2.7: 240 samples, 14,439 s, 5,234 messages, 0 failures, 92.59 MiB/h and 18.71 MiB/1k, settled, no findings. 2.3.0: 240 samples, 5,240 messages, 0 failures, 94.89 MiB/h and 19.14 MiB/1k, settled, no findings. Harness, support bundle, and no-upload stance remain PASS. |
 | Package-level downgrade rollback (#273) | **PENDING** | [rollback guide](rollback.md#rehearsal) | No previous public package exists, so `opencode plugin add @heyimteee/ensemble@<previous>` cannot be rehearsed. State rollback is rehearsed. |
-| Final artifact identity | **PASS for `a0c39c0` + `a7f1eb3` CI; final tagged build PENDING** | [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence) | Final-tip install and 2.2.7/2.3.0 fake E2E pass at `a0c39c0`; required CI is green at `a7f1eb3` and #287 introduces no product runtime change. 2.2.x soak evidence is from `b194b95` and the 2.3.0 soak is supported. If any runtime source changes, rebuild and rerun the clean-install proof; do not publish an unproven runtime. The final tag rebuild gets a public-registry smoke. |
-| Final tag, npm publish, provenance attestation, GitHub release | **PENDING** | [launch plan](launch-plan-0.1.0-rc.2.md) | Human-gated. Requires the approved commit and version, the matching `v<version>` tag, green required checks, successful publish, and a public-registry install smoke. |
+| Final artifact identity | **PASS for `a0c39c0` + `a7f1eb3` CI; final tagged build PENDING** | [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence) | Final-tip install and 2.2.7/2.3.0 fake E2E pass at `a0c39c0`; required CI is green at `a7f1eb3`; #287 introduces no product runtime change; the full macOS checklist including 1.7 is PASS. 2.2.x soak evidence is from `b194b95` and the 2.3.0 soak is supported. If any runtime source changes, rebuild and rerun the clean-install proof; do not publish an unproven runtime. The final tag rebuild gets a public-registry smoke. |
+| Final tag, npm publish, provenance attestation, GitHub release | **PENDING** | [launch plan](launch-plan-0.1.0-rc.2.md) | Human-gated. Requires the approved commit and version, the matching `v<version>` tag, credentials, green required checks, and a successful publish. |
+| Public-registry install smoke | **PENDING** | [launch plan](launch-plan-0.1.0-rc.2.md) | Must pass from the published registry on a supported host before announcing. |
 | Launch announcement | **PENDING** | [launch plan](launch-plan-0.1.0-rc.2.md) | Must follow a successful publish and install smoke. |
 
-**Decision: HOLD publication.** The candidate is documented and proven for the
-scope above, but the release manager has not approved the public tag, publish,
-or announcement. The pending items must be recorded and explicitly accepted
-before the tag is pushed.
+**Decision: READY FOR PUBLISH APPROVAL.** Every verification gate is PASS:
+required CI at `a7f1eb3`, both 4-hour soaks, the final installs on 2.2.7 and
+2.3.0, the full macOS checklist including 1.7, and #281–#287.
+
+**Publish action: HOLD until credentials and human approval exist.** The final
+tag, npm publish, provenance attestation, GitHub release, public-registry
+install smoke, and announcement are not claimed. The only inherent gap is the
+package-downgrade rehearsal, because there is no previous public version.
 
 ## 1. Release identity and notes
 

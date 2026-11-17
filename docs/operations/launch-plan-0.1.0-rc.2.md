@@ -1,16 +1,16 @@
 # Launch plan — Ensemble 0.1.0-rc.2
 
-Status: **draft, not approved.** This plan covers the first public package
-candidate. The publish, GitHub release, and announcement are human-gated. No
-agent may tag, publish, or announce.
+Status: **ready for publish approval; not published.** Every verification gate
+passes. The tag, publish, GitHub release, and announcement remain human-gated.
+No agent may tag, publish, or announce.
 
 ## Release being launched
 
 - Package: `@heyimteee/ensemble@0.1.0-rc.2`, MIT, one OpenCode plugin with the
   server, TUI, and RPC parts.
 - Supported hosts for this launch: OpenCode `2.2.6`, `2.2.7`, and `2.3.0` on
-  Linux/tmux. macOS/Herdr is verified on `2.2.7` only, except manual check 1.7;
-  macOS 2.3.0 is not claimed.
+  Linux/tmux. macOS/Herdr is verified on `2.2.7` only with the full checklist
+  including 1.7; macOS 2.3.0 is not claimed.
 - Not in scope: Windows, WSL, OpenCode releases outside the supported range,
   and the final `0.1.0` version.
 - Public npm dist-tag: `next`. A prerelease must not become `latest`.
@@ -26,8 +26,9 @@ Primary:
 
 Secondary:
 
-- macOS users running Herdr in Ghostty, with the explicit caveat that mouse
-  drag (checklist 1.7) is not verified.
+- macOS users running Herdr in Ghostty, with the verified Shift+drag and
+  explicit-copy path. Automatic copy-on-release is a host preference and is
+  not claimed.
 - Teams evaluating a local, no-telemetry workflow who can provide structured
   bug reports through GitHub Issues.
 
@@ -67,9 +68,10 @@ files, or unredacted logs.
 
 1. **Approve the candidate.** The release manager reviews
    [the sign-off](release-signoff.md), records the date and name, and
-   explicitly accepts or clears each pending item: macOS 1.7 and the
-   package-downgrade gap. Both supported Linux hosts passed the 4-hour soak,
-   and required CI is green on all three OpenCode versions.
+   records the READY FOR PUBLISH APPROVAL decision, and accepts the inherent
+   package-downgrade gap. Every verification gate is PASS: required CI on all
+   three OpenCode versions, both 4-hour soaks, both final installs, the full
+   macOS checklist including 1.7, and #281–#287.
 2. **Freeze the release commit.** Merge the approved release commit; every
    required check in [the release guide](release.md) must be green. No runtime
    change after the last clean-install evidence without a re-run.
@@ -143,5 +145,6 @@ There is no telemetry, so success is judged from public signals:
   run.
 - Windows support, paid support, hosted service, or a marketing campaign.
 - Claiming a macOS or non-Linux 4-hour soak. Both supported Linux hosts passed
-  the 4-hour gate; macOS 2.3.0 is not claimed. The macOS mouse-drag check and
-  Herdr prefix ownership remain pending or inconclusive until recorded.
+  the 4-hour gate; macOS 2.3.0 is not claimed. Automatic copy-on-release and
+  Herdr prefix ownership are not claimed; the former is a host preference and
+  the latter remains inconclusive.

@@ -46,7 +46,10 @@ from the older `rc-0.1.0-rc.2` evidence tag.
 - A tag-driven release workflow with a token-free dry run, npm provenance, a
   CycloneDX SBOM, and changelog-based GitHub release notes.
 - macOS/Herdr verification of the installed package through SSH, including the
-  deterministic fake E2E. macOS/Herdr is verified on OpenCode 2.2.7 only.
+  deterministic fake E2E and the full manual checklist. 1.7 passes with a
+  pane-bounded Shift+drag and explicit copy; automatic copy-on-release is a
+  host preference and is not claimed. macOS/Herdr is verified on OpenCode 2.2.7
+  only.
 - OpenCode 2.3.0 support: Linux host probe 14/14, size matrix, deterministic
   fake E2E, and loopback install. The compatibility matrix and required context
   include 2.3.0. (#286)
@@ -141,8 +144,10 @@ logs. Maintainer response targets are best effort, not an SLA.
 ## Known limitations
 
 - **Windows is out of scope.** Native Windows and WSL are untested.
-- **macOS mouse drag is not claimed.** Manual checklist item 1.7 was not run,
-  so selection and drag-copy behavior are unverified. Cmd+C and Cmd+V passed.
+- **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
+  passed with a pane-bounded Shift+drag and explicit copy; Ghostty
+  `copy-on-select` is off, so a drag alone does not copy. This is a host
+  preference, not Ensemble behavior. Cmd+C and Cmd+V also passed.
 - **Herdr prefix control is inconclusive.** The host-level test produced no tab
   or pane; no Ensemble key was observed to be intercepted, but the host claim
   is not proven.
@@ -166,7 +171,9 @@ logs. Maintainer response targets are best effort, not an SLA.
 The final-tip runtime checks at `b194b95` established the 2.2.x evidence. The
 latest tip `a7f1eb3` adds OpenCode 2.3.0 support (#286), hardens live TUI
 readiness (#287), and passes the full required CI matrix on the first attempt.
-The clean install is still a loopback-registry check, not a public npm install.
+The full macOS checklist including 1.7 also passes. All verification gates are
+now complete; the release is ready for publish approval. The clean install is
+still a loopback-registry check, not a public npm install.
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -178,11 +185,12 @@ The clean install is still a loopback-registry check, not a public npm install.
 | Live TUI readiness (#287) | **PASS** | Harness false positive after Backspace (`:setting` → retype `s` → `:settings` restored); statusline-gated open and deterministic retype ordering. No product runtime change; 2,121 tests. |
 | Required CI at `a7f1eb3` | **PASS (first attempt, no rerun)** | Verify (`verify`, `live-fake`, `live-native`, `live-multilocation`, `latency-smoke`), Compatibility (2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix green. [Parent record](../verification/2026-11-17-ticket-268.md#required-ci-at-a7f1eb3) |
 | Six native tools, installed TUI route, `/ensemble` | **PASS** | [#279](../verification/2026-11-16-ticket-279.md), [#277](../verification/2026-11-16-ticket-277.md) |
-| macOS/Herdr install, TUI, fake E2E, checklist except 1.7 | **PASS except 1.7** | [#277](../verification/2026-11-16-ticket-277.md) |
+| macOS/Herdr install, TUI, fake E2E, full checklist | **PASS** | [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS/Herdr on OpenCode 2.3.0 | **PENDING (not claimed)** | Only 2.2.7 is verified on macOS/Herdr. |
-| macOS mouse drag (1.7) | **PENDING** | Not run; no selection/copy claim |
+| macOS mouse drag (1.7) | **PASS** | Pane-bounded Shift+drag over the composer marker, then explicit `copy_to_clipboard`; statusline and focus unchanged. |
+| Automatic copy-on-release on macOS | **NOT CLAIMED** | Ghostty `copy-on-select` is off; explicit copy is required. |
 | 4-hour enforced soak at `b194b95` | **PASS on OpenCode 2.2.7 and 2.3.0** | 2.2.7: 240 samples, 14,439 s, 5,234 messages, 0 failures, 92.59 MiB/h and 18.71 MiB/1k. 2.3.0: 240 samples, 5,240 messages, 0 failures, 94.89 MiB/h and 19.14 MiB/1k. [soak record](../verification/2026-11-17-soak.md) |
-| Public npm publish, tag, GitHub release, announcement | **PENDING** | Human-gated; see [launch plan](launch-plan-0.1.0-rc.2.md) |
+| Public npm publish, tag, GitHub release, public-registry install smoke, announcement | **PENDING** | Human-gated; see [launch plan](launch-plan-0.1.0-rc.2.md) |
 
 The full release decision, sign-offs, and remaining gates are in
 [Release sign-off](release-signoff.md#candidate-sign-off--010-rc2-2026-11-17)
