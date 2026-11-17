@@ -529,6 +529,12 @@ live_type "$LIVE_TUI_SESSION" "t"
 live_key "$LIVE_TUI_SESSION" End
 live_require_text "$LIVE_TUI_SESSION" ":settings" 10 "Left and insertion edit at the command cursor"
 live_key "$LIVE_TUI_SESSION" BSpace
+# `:setting` is a prefix of `:settings`, so a plain substring wait can pass on
+# the pre-Backspace frame. Then the one-character retype restores the exact
+# pane the liveness check captured before the edit, and `live_type` reports a
+# lost key that actually arrived (ticket #287, OpenCode 2.3.0 CI). Wait for the
+# shorter line to render before retyping.
+live_require_absence "$LIVE_TUI_SESSION" ":settings" 10 "Backspace removed the trailing character"
 live_require_text "$LIVE_TUI_SESSION" ":setting" 10 "Backspace removes the character before the cursor"
 live_type "$LIVE_TUI_SESSION" "s"
 live_key "$LIVE_TUI_SESSION" Home

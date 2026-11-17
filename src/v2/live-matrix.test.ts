@@ -252,6 +252,68 @@ test("the reduced-motion frame asserts the Ensemble card, not host chrome", () =
   }
 })
 
+function openEnsemble(box: Sandbox, pane: string, tmuxStatus = 0) {
+  const tmuxLog = join(box.root, "tmux.log")
+  const tmux = join(box.root, "tmux-stub.sh")
+  writeFileSync(tmux, '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >>"$TMUX_STUB_LOG"\nexit "$TMUX_STUB_STATUS"\n', {
+    mode: 0o755,
+  })
+  const command = [
+    'source "$1"',
+    'PANE="$2"',
+    'LIVE_TMUX_BIN="$3"',
+    'LIVE_TUI_SESSION="ensemble-probe"',
+    'live_capture() { cat "$PANE"; }',
+    'live_type() { :; }',
+    'live_key() { :; }',
+    'live_open_ensemble',
+  ].join('; ')
+  const result = spawnSync(bash, ["-c", command, "--", harness, pane, tmux], {
+    encoding: "utf8",
+    env: environment(box, {
+      ENSEMBLE_LIVE_STEP_TIMEOUT: "1",
+      ENSEMBLE_LIVE_TUI_WIDTH: "132",
+      ENSEMBLE_LIVE_TUI_HEIGHT: "44",
+      TMUX_STUB_LOG: tmuxLog,
+      TMUX_STUB_STATUS: String(tmuxStatus),
+    }),
+  })
+  return { result, resize: existsSync(tmuxLog) ? readFileSync(tmuxLog, "utf8") : "" }
+}
+
+test("opening Ensemble waits for the statusline, not just the page header", () => {
+  // Ticket #287: OpenCode 2.3.0 in CI painted this header a frame before the
+  // statusline and composer, and the suite's first typed key was lost. The
+  // page is only open when the mode chip row exists; the resize forces that
+  // frame at the declared geometry.
+  const box = sandbox()
+  const header = ["│ ENSEMBLE │ no workspace │", "│ AGENTS (0) │ CHAT │", "│ No currently opened session │"]
+  try {
+    const partial = join(box.root, "header-only.txt")
+    writeFileSync(partial, [...header, ""].join("\n"))
+    const closed = openEnsemble(box, partial)
+    assert.notEqual(closed.result.status, 0, "a header-only page is not ready for input")
+    assert.match(closed.result.stderr, /TUI did not become ready: Ensemble statusline/)
+    assert.match(closed.resize, /resize-window -t ensemble-probe -x 132 -y 44/)
+
+    const transcriptOnly = join(box.root, "transcript-only.txt")
+    writeFileSync(transcriptOnly, [...header, "│ → earlier NORMAL │ Agents mention │", ""].join("\n"))
+    assert.notEqual(
+      openEnsemble(box, transcriptOnly).result.status,
+      0,
+      "a mode word inside another row does not prove the statusline rendered",
+    )
+
+    const ready = join(box.root, "ready.txt")
+    writeFileSync(ready, [...header, " NORMAL  │ Agents │ j/k move │", ""].join("\n"))
+    const opened = openEnsemble(box, ready, 1)
+    assert.equal(opened.result.status, 0, opened.result.stderr)
+    assert.match(opened.resize, /resize-window -t ensemble-probe -x 132 -y 44/)
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
 function captureChatHeader(box: Sandbox, pane: string): number | null {
   const result = spawnSync(
     bash,
