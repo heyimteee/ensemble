@@ -48,7 +48,8 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Backup and restore](operations/backup-restore.md): the durable-state document, RPC actions, the operator CLI, the automatic rollback slot, and failure recovery
 - [Upgrade from the pre-release](operations/upgrade.md): native-first defaults, AGENTS v7, the native-state refactor, and additive durable-state migrations
 - [Package rollback](operations/rollback.md): package-only and state rollback, plus the rehearsed failure path
-- [Release operations](operations/release.md): the tag-driven workflow, the token-free dry run, main protection and its 11 real check contexts, provenance, the SBOM, and the changelog-based GitHub release
+- [Release operations](operations/release.md): the tag-driven workflow, the token-free dry run, main protection and its 12 real check contexts, OIDC trusted publishing, provenance, the SBOM, and the changelog-based GitHub release
+- [Release notes for 0.1.0](operations/release-notes-0.1.0.md): the stable 0.x release, install/upgrade/rollback path, verification, support route, and known limitations
 - [Release notes for 0.1.0-rc.2](operations/release-notes-0.1.0-rc.2.md): the published-prerelease notes, public install smoke, install/upgrade/rollback path, support route, npm `latest` caveat, and known limitations
 - [Launch plan for 0.1.0-rc.2](operations/launch-plan-0.1.0-rc.2.md): audience, channels, support path, rollback triggers, and the completed publish sequence; the announcement remains separate
 - [Release sign-off checklist](operations/release-signoff.md): the completed released sign-off for `0.1.0-rc.2`, including the public install smoke, npm `latest` caveat, provenance, GitHub release, and the reusable pre-tag gate for a future release

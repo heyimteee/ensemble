@@ -4,7 +4,7 @@
 
 Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is MIT licensed, named `@heyimteee/ensemble`, and published on npm as the `0.1.0-rc.3` prerelease. Compatibility is verified on OpenCode **2.2.6**, **2.2.7**, and **2.3.0** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
+> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is MIT licensed, named `@heyimteee/ensemble`, and published on npm as the stable **`0.1.0`** 0.x release; prereleases remain under `next`. Compatibility is verified on OpenCode **2.2.6**, **2.2.7**, and **2.3.0** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
 
 > **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md); the terminal-turn workflow is in [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md). Current behavior and evidence are recorded in the verification index.
 
@@ -37,13 +37,13 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 
 ## Install
 
-Ensemble is one npm OpenCode plugin package, `@heyimteee/ensemble`, containing both the server and TUI parts. The current published prerelease is `0.1.0-rc.3`; pin it explicitly or use the `next` channel:
+Ensemble is one npm OpenCode plugin package, `@heyimteee/ensemble`, containing both the server and TUI parts. The current stable release is `0.1.0`:
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0-rc.3
+opencode plugin add @heyimteee/ensemble@0.1.0
 ```
 
-npm exposes `0.1.0-rc.3` under the `next` tag and `0.1.0-rc.2` under `latest`. npm requires a `latest` tag and rejects deleting it, so until a stable release moves `latest`, a bare `npm install @heyimteee/ensemble` installs rc.2. Pin the exact version for deliberate installs; `next` follows the newest prerelease.
+npm exposes `0.1.0` under `latest`; the prerelease channel `next` points at `0.1.0-rc.3`. A bare `npm install @heyimteee/ensemble` installs the stable release. Pin the exact version for deliberate installs.
 
 Run `/ensemble` or the **Open Ensemble** palette command. Do not also load the same plugin from `.opencode/plugins/`; that creates a duplicate plugin ID.
 
@@ -190,7 +190,7 @@ Every requested directory is queried on the **one selected service**, sequential
 
 ## Known limitations
 
-- **The prerelease channel owns `next`.** `0.1.0-rc.3` is published as a GitHub prerelease and under the npm `next` tag; `latest` still points at `0.1.0-rc.2` because npm requires a `latest` tag and rejects deleting it (`npm dist-tag rm ... latest` returns E400). Pin `@heyimteee/ensemble@0.1.0-rc.3` or use `@next`; a stable release will move `latest`. See the [changelog](CHANGELOG.md) and the [public releases](https://github.com/heyimteee/ensemble/releases).
+- **Stable owns `latest`.** `0.1.0` is the stable release and the npm `latest`; prereleases stay under `next` (`0.1.0-rc.3`). Pin the exact version for deliberate installs. This is a 0.x release: minor versions may still change APIs. See the [changelog](CHANGELOG.md) and the [public releases](https://github.com/heyimteee/ensemble/releases).
 - **Host support is narrow.** Only OpenCode 2.2.6, 2.2.7, and 2.3.0 on Linux/tmux are tested. The installed macOS/Herdr path is verified on 2.2.7 only, including checklist 1.7; macOS 2.3.0 is not claimed, and Windows/WSL is out of scope. Other host releases load with a runtime warning but are untested. See the [support matrix](docs/support/support-matrix.md) for the evidence and platform boundary.
 - **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. Every PR runs the deterministic fake, size, lifecycle, subagent, native-first, Vera, tool-surface, multi-location, and latency-smoke jobs; the real-model `npm run test:live` acceptance is opt-in in the nightly workflow (`ENSEMBLE_NIGHTLY_REAL=1`) and is never part of the PR gate.
 - **Terminal accessibility depends on the host.** Screen-reader output, high-contrast modes, font scaling, and automatic mouse copy-on-release are host features. Ensemble supplies glyph-and-word status, reduced-motion, `NO_COLOR`, and ASCII fallbacks; see the [terminal accessibility checklist](docs/verification/terminal-accessibility-checklist.md).
