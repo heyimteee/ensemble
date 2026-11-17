@@ -124,6 +124,20 @@ function attr(source, name) {
   return match?.[1]
 }
 
+/**
+ * The docs check contract reports a missing required page as a validation
+ * failure (exit 1), not an uncaught I/O error (exit 2). Keep the missing-file
+ * diagnostic so a real repository cannot silently pass with no README.
+ */
+function readRequiredPage(root, relativePath, failures) {
+  const full = join(root, relativePath)
+  if (!existsSync(full)) {
+    failures.push(`${relativePath}: file is missing`)
+    return undefined
+  }
+  return readFileSync(full, "utf8")
+}
+
 function checkMarkdownMedia(root, manifest, failures) {
   const pages = markdownPages(root)
   const used = new Set()
@@ -194,16 +208,20 @@ function checkMarkdownMedia(root, manifest, failures) {
     const asset = manifest.assets[name]
     if (asset.kind === "screenshot" && !used.has(name)) failures.push(`media: ${name} is not referenced by a DocsFigure`)
   }
-  const rootReadme = readFileSync(join(root, "README.md"), "utf8")
-  for (const match of rootReadme.matchAll(/<img\b[^>]*>/g)) {
-    if (!/\balt\s*=\s*"[^"]{30,}"/.test(match[0])) failures.push("README.md: raw img needs useful alt text")
+  const rootReadme = readRequiredPage(root, "README.md", failures)
+  if (rootReadme) {
+    for (const match of rootReadme.matchAll(/<img\b[^>]*>/g)) {
+      if (!/\balt\s*=\s*"[^"]{30,}"/.test(match[0])) failures.push("README.md: raw img needs useful alt text")
+    }
+    if (!rootReadme.includes("docs/public/media/workspace-shell.png")) {
+      failures.push("README.md: the product landing page must show the workspace screenshot")
+    }
   }
-  if (!rootReadme.includes("docs/public/media/workspace-shell.png")) {
-    failures.push("README.md: the product landing page must show the workspace screenshot")
+  const home = readRequiredPage(root, "docs/README.md", failures)
+  if (home) {
+    if (!home.includes("hero-terminal.cast")) failures.push("docs/README.md: TerminalHero must use hero-terminal.cast")
+    if (!home.includes("<TerminalHero")) failures.push("docs/README.md: the terminal hero is missing")
   }
-  const home = readFileSync(join(root, "docs/README.md"), "utf8")
-  if (!home.includes("hero-terminal.cast")) failures.push("docs/README.md: TerminalHero must use hero-terminal.cast")
-  if (!home.includes("<TerminalHero")) failures.push("docs/README.md: the terminal hero is missing")
   return diagramCount
 }
 

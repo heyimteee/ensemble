@@ -11,6 +11,8 @@ const repoRoot = fileURLToPath(new URL("../..", import.meta.url))
 
 const COPIED_PATHS = [
   "package.json",
+  "README.md",
+  "LICENSE",
   "docs",
   ".github/workflows/verify.yml",
   ".github/workflows/node-matrix.yml",
@@ -208,6 +210,22 @@ test("docs:check fails when generated reference drifts", () => {
     const result = run([docsCheck, "--root", root])
     assert.equal(result.status, 1)
     assert.match(result.stderr, /reference:check|ensemble_review/)
+    assert.doesNotMatch(result.stderr, /docs:check: media:/)
+    assert.doesNotMatch(result.stderr, /^docs:check: README\.md: file is missing$/m)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs:check reports a missing root README as a failure, not an internal error", () => {
+  const root = fixtureRepo()
+  try {
+    rmSync(join(root, "README.md"))
+    const docsCheck = fileURLToPath(new URL("../../scripts/docs-check.mjs", import.meta.url))
+    const result = run([docsCheck, "--root", root])
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /README\.md: file is missing/)
+    assert.doesNotMatch(result.stderr, /ENOENT/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

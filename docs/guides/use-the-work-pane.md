@@ -29,7 +29,7 @@ only the actions the focused card can run.
 <DocsFigure
   src="/media/work-history.png"
   alt="Work pane in HISTORY view with three rolled-up finished groups; the newest group is expanded to a REPLIED ADA card."
-  caption="HISTORY rolls older groups up to one row and expands the newest finished group. press Enter to expand or collapse a group; press D to clear the view without deleting rows."
+  caption="HISTORY rolls older groups up to one row and expands the newest finished group. Press Enter to expand or collapse a group; press D to clear the view without deleting rows."
   width="742"
   height="510"
 />

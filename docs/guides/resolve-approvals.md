@@ -20,7 +20,7 @@ you resolve them.
 <DocsFigure
   src="/media/approvals.png"
   alt="Full-height approvals inbox with one pending Memory approval titled Promote memory for Ada and the decision footer."
-  caption="Pending approvals stay under Work. press v to open the full-height inbox; press Enter to resolve the selected decision and Esc to return to split view."
+  caption="Pending approvals stay under Work. Press v to open the full-height inbox; press Enter to resolve the selected decision and Esc to return to split view."
   width="742"
   height="510"
 />
