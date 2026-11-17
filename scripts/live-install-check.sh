@@ -30,8 +30,8 @@ PACKAGE_NAME=$("$LIVE_NODE_BIN" -p 'require(process.argv[1]).name' "$LIVE_ROOT/p
 PACKAGE_VERSION=$("$LIVE_NODE_BIN" -p 'require(process.argv[1]).version' "$LIVE_ROOT/package.json")
 [[ "$PACKAGE_NAME" == "@heyimteee/ensemble" ]] \
   || live_fail "unexpected package name: $PACKAGE_NAME"
-[[ "$PACKAGE_VERSION" == "0.1.0-rc.3" ]] \
-  || live_fail "expected release candidate 0.1.0-rc.3, found $PACKAGE_VERSION"
+[[ "$PACKAGE_VERSION" == "0.1.0" ]] \
+  || live_fail "expected release 0.1.0, found $PACKAGE_VERSION"
 PACKAGE_SPEC="$PACKAGE_NAME@$PACKAGE_VERSION"
 
 # A mock project and agent prove the install does not need the repository as a

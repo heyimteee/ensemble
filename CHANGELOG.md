@@ -6,15 +6,46 @@ All notable changes to Ensemble are recorded here. The format follows
 
 The tag-driven release workflow reads the `## [<version>]` section for the
 version in `package.json` and uses it as the GitHub release body. A version
-without a non-empty section is refused by the release preflight. The
-`0.1.0-rc.3` entry is the current prerelease note; `0.1.0-rc.2` is the first
-public prerelease. The final stable version and any launch announcement remain
-separate decisions.
+without a non-empty section is refused by the release preflight. `0.1.0` is the
+first stable 0.x release; `0.1.0-rc.2` and `0.1.0-rc.3` remain the public
+prerelease history.
 
 ## [Unreleased]
 
-- The final `0.1.0` version and announcement remain separate decisions. The
-  current prerelease is `0.1.0-rc.3`.
+- No release is pending. `0.1.0` is the stable 0.x release; prereleases remain
+  under the npm `next` tag.
+
+## [0.1.0] - 2026-11-17
+
+First stable 0.x release. The runtime is identical to `0.1.0-rc.3`; this is the
+promotion of the validated release candidate to the default npm channel.
+
+### Changed
+
+- npm `latest` moves to `0.1.0`. The prerelease channel `next` remains at
+  `0.1.0-rc.3`.
+- No API or behavior change from `0.1.0-rc.3`.
+
+### Verified
+
+- Required CI green across OpenCode 2.2.6, 2.2.7, and 2.3.0, and Node
+  22.23.4/24.22.1/26.12.1.
+- 4-hour enforced soak PASS on OpenCode 2.2.7 and 2.3.0.
+- Full macOS/Herdr checklist PASS, including pane-bounded mouse selection.
+- Public-registry install smoke PASS on OpenCode 2.2.7 and 2.3.0; this release
+  is published through npm trusted publishing (OIDC) with provenance and a
+  CycloneDX SBOM.
+- The GitHub release is a normal release, not a prerelease.
+
+### Known limitations
+
+- Windows/WSL are out of scope.
+- Git-spec installs fail upstream in OpenCode 2.2.7; use npm.
+- Herdr prefix control is inconclusive host evidence; automatic
+  copy-on-release follows the host's Ghostty setting.
+- There is no earlier public version, so a package downgrade cannot be
+  rehearsed.
+- This is a 0.x release: minor versions may still change APIs.
 
 ## [0.1.0-rc.3] - 2026-11-17
 
