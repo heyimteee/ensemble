@@ -77,7 +77,7 @@ jobs:
         run: npm run test:live:subagent
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-fake-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -117,7 +117,7 @@ jobs:
         run: npm run test:live:tool-surface
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-native-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -149,7 +149,7 @@ jobs:
         run: npm run test:live:multilocation
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-multilocation-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -185,7 +185,7 @@ jobs:
         run: npm run test:live:latency
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latency-smoke-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
