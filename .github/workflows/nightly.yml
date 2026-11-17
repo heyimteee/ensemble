@@ -38,7 +38,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -60,7 +60,7 @@ jobs:
         run: npm run test:live:latency
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latency-reference-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -74,7 +74,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -93,7 +93,7 @@ jobs:
         run: npm run soak:smoke
       - name: Upload soak record
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soak-smoke-record
           path: ${{ runner.temp }}/ensemble-soak-smoke
@@ -101,7 +101,7 @@ jobs:
           retention-days: 14
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soak-smoke-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -116,7 +116,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -134,7 +134,7 @@ jobs:
         run: npm run test:live
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: real-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts

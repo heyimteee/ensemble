@@ -7,13 +7,33 @@ All notable changes to Ensemble are recorded here. The format follows
 The tag-driven release workflow reads the `## [<version>]` section for the
 version in `package.json` and uses it as the GitHub release body. A version
 without a non-empty section is refused by the release preflight. The
-`0.1.0-rc.2` entry is the first public prerelease. A final stable version and
-any launch announcement remain separate decisions.
+`0.1.0-rc.3` entry is the current prerelease note; `0.1.0-rc.2` is the first
+public prerelease. The final stable version and any launch announcement remain
+separate decisions.
 
 ## [Unreleased]
 
-- No public version is pending. `0.1.0-rc.2` is published as a GitHub
-  prerelease and on npm; the final stable version remains a separate decision.
+- The final `0.1.0` version and announcement remain separate decisions. The
+  current prerelease is `0.1.0-rc.3`.
+
+## [0.1.0-rc.3] - 2026-11-17
+
+Trusted-publishing validation release. The runtime is identical to
+`0.1.0-rc.2`; only the publish path and release metadata change.
+
+### Changed
+
+- npm publishing uses GitHub Actions OIDC trusted publishing. The long-lived
+  `NPM_TOKEN` secret is no longer used by the release workflow.
+- The GitHub release marks prerelease versions as prereleases automatically.
+
+### Verified
+
+- `npm run verify` and `docs:check` on the release commit.
+- The tag workflow publishes through OIDC with npm provenance and the
+  CycloneDX SBOM, then creates the GitHub prerelease.
+- `next` moves to `0.1.0-rc.3`; npm `latest` remains `0.1.0-rc.2` until a
+  stable release moves it.
 
 ## [0.1.0-rc.2] - 2026-11-16
 

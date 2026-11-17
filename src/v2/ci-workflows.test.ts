@@ -101,9 +101,9 @@ test("a live job without the require-mode contract is rejected", () => {
 })
 
 test("a live job without failure artifact upload is rejected", () => {
-  const text = read(verifyWorkflowPath).replace("actions/upload-artifact@v4", "actions/upload-artifact@v3")
+  const text = read(verifyWorkflowPath).replace("actions/upload-artifact@v7", "actions/upload-artifact@v3")
   const failures = checkVerifyWorkflow(text, supported)
-  assert.ok(failuresMatching(failures, /live-fake.*upload-artifact@v4/).length > 0)
+  assert.ok(failuresMatching(failures, /live-fake.*upload-artifact@v7/).length > 0)
 })
 
 test("a PR job over its documented time budget is rejected", () => {
@@ -176,7 +176,7 @@ test("the compatibility fake smoke keeps harness artifacts for a failure diagnos
     failuresMatching(checkCompatibilityWorkflow(noArtifactDir, supported), /ENSEMBLE_LIVE_ARTIFACTS/).length > 0,
   )
 
-  const noUpload = text.replace("        if: failure()\n        uses: actions/upload-artifact@v4\n        with:\n          name: live-artifacts-${{ matrix.opencode }}", "        uses: actions/upload-artifact@v4\n        with:\n          name: live-artifacts-${{ matrix.opencode }}")
+  const noUpload = text.replace("        if: failure()\n        uses: actions/upload-artifact@v7\n        with:\n          name: live-artifacts-${{ matrix.opencode }}", "        uses: actions/upload-artifact@v7\n        with:\n          name: live-artifacts-${{ matrix.opencode }}")
   assert.ok(
     failuresMatching(checkCompatibilityWorkflow(noUpload, supported), /live artifacts.*if: failure\(\)/).length > 0,
   )
@@ -256,7 +256,7 @@ test("a release workflow that can run on a branch push or pull request is reject
   assert.ok(failuresMatching(checkReleaseWorkflow(barePush), /tag/).length > 0)
 })
 
-test("a real publish needs the tag ref, provenance, the npm token secret, and OIDC", () => {
+test("a real publish uses OIDC and refuses the NPM_TOKEN path", () => {
   const text = read(releaseWorkflowPath)
 
   const withoutProvenance = text.replace(
@@ -265,8 +265,11 @@ test("a real publish needs the tag ref, provenance, the npm token secret, and OI
   )
   assert.ok(failuresMatching(checkReleaseWorkflow(withoutProvenance), /provenance/).length > 0)
 
-  const withoutToken = removeLine(text, "NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}")
-  assert.ok(failuresMatching(checkReleaseWorkflow(withoutToken), /NPM_TOKEN/).length > 0)
+  const withToken = text.replace(
+    "      - name: Publish with OIDC provenance\n        run: npm publish",
+    "      - name: Publish with OIDC provenance\n        env:\n          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n        run: npm publish",
+  )
+  assert.ok(failuresMatching(checkReleaseWorkflow(withToken), /OIDC|NPM_TOKEN/).length > 0)
 
   const withoutOidc = removeLine(text, "id-token: write")
   assert.ok(failuresMatching(checkReleaseWorkflow(withoutOidc), /id-token/).length > 0)
@@ -305,6 +308,9 @@ test("the release produces an SBOM and publishes the notes on the GitHub release
 
   const noRelease = removeLine(text, "gh release create")
   assert.ok(failuresMatching(checkReleaseWorkflow(noRelease), /GitHub release/).length > 0)
+
+  const noPrerelease = removeLine(text, 'prerelease="--prerelease"')
+  assert.ok(failuresMatching(checkReleaseWorkflow(noPrerelease), /prerelease/).length > 0)
 })
 
 test("the required main checks are exactly the workflow job names", () => {
