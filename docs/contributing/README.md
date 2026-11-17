@@ -24,6 +24,12 @@ docs index.
 - [Evidence index](evidence.md): ADRs, verification records, implementation
   notes, assessments, and compatibility evidence.
 
+Build the docs site locally with `npm run docs:site` and publish-preview it with
+`npm run docs:site:preview`. `npm run docs:site:build` runs the sidebar,
+reachability, redirect, SEO, sitemap, and generated-artifact checks before the
+VitePress build; keep `npm run docs:check` separate and fast as the Docs
+workflow does.
+
 Update user documentation when externally visible behavior changes. Keep ADRs
 and verification records public, but do not put them in the primary user
 navigation; link them from the [evidence index](evidence.md) or as a **Go

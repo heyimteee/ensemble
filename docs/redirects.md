@@ -9,6 +9,24 @@ Use this map when following an old bookmark, an old section anchor, or a link
 from a historical record. `npm run docs:check` keeps the section indexes, the
 style guide, and this map reachable from the [docs home](README.md).
 
+## Site redirects
+
+The published site uses clean URLs under `/ensemble/` and rewrites each section
+`README.md` to its directory URL. GitHub Pages cannot read `_redirects`, so the
+site build emits meta-refresh pages for the old URL forms. The generated map
+covers:
+
+- the old docs home (`/docs/`, `/docs/README.html`, `/docs.html`) to `/`;
+- section README and `.md`/`.html` forms such as
+  `/getting-started/README.html` to `/getting-started/`;
+- `.html` forms of the section landing pages such as `/reference.html` to
+  `/reference/`.
+
+The site build fails when a redirect target is not a built page or a redirect
+would overwrite a real page. See
+[`docs-site-check`](../scripts/docs-site-check.mjs) and
+[`docs-site-artifacts`](../scripts/docs-site-artifacts.mjs).
+
 ## Section redirects
 
 | Old `docs/README.md` section | New home |
