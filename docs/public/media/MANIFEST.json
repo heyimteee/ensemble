@@ -14,24 +14,24 @@
   "assets": {
     "workspace-shell.png": {
       "kind": "screenshot",
-      "bytes": 73408,
+      "bytes": 72812,
       "width": 1100,
       "height": 680,
-      "sha256": "94c16a805c7725bad069c6d85f66ad1c65c17c0e5eed520d454642cc933f763a"
+      "sha256": "92745087efc6731a289e682c5da739ad6f1f63a9a46518898a5a7c6d07b07270"
     },
     "work-active.png": {
       "kind": "screenshot",
-      "bytes": 29597,
+      "bytes": 29638,
       "width": 742,
       "height": 510,
-      "sha256": "994609be85951ce9ce6a8f6fe0d3163c867c678dd67db6c343d84b3cb148a50c"
+      "sha256": "2a6d9138d86fa7ffb8e0ba3634dda4ea5924909ad90c6c7c155da101fd774a8d"
     },
     "work-history.png": {
       "kind": "screenshot",
-      "bytes": 33959,
+      "bytes": 34260,
       "width": 742,
       "height": 510,
-      "sha256": "c35a6d28f1ecf6230298ebbb8cce35a91c5467bfc0f9d3f1598147713c9dbb8b"
+      "sha256": "904a9938a45b37e0d8b5d415e1bb6f5af6685f68280d91c50663002de588c407"
     },
     "approvals.png": {
       "kind": "screenshot",
@@ -42,25 +42,25 @@
     },
     "settings.png": {
       "kind": "screenshot",
-      "bytes": 48310,
+      "bytes": 47161,
       "width": 700,
       "height": 930,
-      "sha256": "7bb0588f0ed2e3b012ac0db04c50f3edf069888599ae4aa1a1124d3b0d8ffb47"
+      "sha256": "c5a40c52103a8c22933c85e12e2351e58b25baea26d960d980c14ac0386fe6e3"
     },
     "native-session.png": {
       "kind": "screenshot",
-      "bytes": 60041,
+      "bytes": 59909,
       "width": 1100,
       "height": 680,
-      "sha256": "293bdde581269ac41a7d4a6e6369e8b012f3448e904662d04bce3f514b2ab3d4"
+      "sha256": "741d01efd9e1c44f2318546ad6ba315d23638be5f288e3ed93f8c70ef506da28"
     },
     "hero-terminal.cast": {
       "kind": "cast",
-      "bytes": 98743,
+      "bytes": 98657,
       "width": 110,
       "height": 34,
       "events": 6,
-      "sha256": "3f57537f688ff6d3bce04a4a7f67ba22ef96c04328928029eb714da1e422cc71"
+      "sha256": "9e6a148e0f807aec33e95e0974c1ca77303a7d876cc3e831ea928b50dfd42b74"
     }
   }
 }

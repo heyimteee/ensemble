@@ -8,7 +8,7 @@ version: 0.1.x
 
 Init inspects the project and writes two things: a canonical Ensemble block in
 `AGENTS.md` and init metadata under `.ensemble/`. It also runs a native `/init`
-turn so the assistant can add verified project guidance around that block.
+turn so the agent can add verified project guidance around that block.
 
 ## Before you start
 

@@ -38,7 +38,7 @@ you resolve them.
 
 3. Move with `j`/`k` and read the source tag and detail.
    The tag is **Native**, **Agent**, **Workspace**, or **Memory**. A related
-   card reads **NEEDS YOU** and stays in ACTIVE.
+   work item reads **NEEDS YOU** and stays in ACTIVE.
 
 4. Press `Enter` to resolve the focused approval, then choose the decision:
    - **Approve** or **Reject** for a general request.

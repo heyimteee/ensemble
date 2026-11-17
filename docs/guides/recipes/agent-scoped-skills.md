@@ -46,7 +46,7 @@ owns the turn, and leave every other agent's Skillbox unchanged.
    shows only Linus's assigned skills. Choose one.
 5. Finish the request and press `Enter`. Linus receives the exact message text
    with the skill request, and one work item is created for Linus.
-6. Open Linus's card and press `o` to confirm the native session loaded the skill
+6. Open Linus's work item and press `o` to confirm the native session loaded the skill
    and produced the result.
 
 For a General skill with no owner, type `/` at the start of the message in the
@@ -86,13 +86,13 @@ changes since the last tag and add only verified fixes. Keep the existing format
 
 ## What to watch in Work
 
-- **One card for Linus.** A skill does not create one work item per skill.
+- **One work item for Linus.** A skill does not create one work item per skill.
   Multiple skills for the same agent become one prompt and one work item.
-- **The assignee is the owner.** If a different agent receives the card, the
+- **The assignee is the owner.** If a different agent receives the work item, the
   skill was invoked without the owner scope or the owner picker chose another
   member.
-- **No card for Grace.** Another agent must not receive a copy of the skill or
-  the task. A card for Grace means the message addressed Grace instead.
+- **No work item for Grace.** Another agent must not receive a copy of the skill or
+  the task. A work item for Grace means the message addressed Grace instead.
 - **The draft stays after a rejection.** An unknown skill, a stale assignment, a
   wrong owner, or a direct-chat General skill rejects the whole message before a
   transcript line or work item exists.
@@ -124,7 +124,7 @@ changes since the last tag and add only verified fixes. Keep the existing format
 - **A direct chat is used for a General skill.** General skills need leader
   triage, so they belong in the group chat.
 - **The wrong owner is chosen.** `$Agent /` filters to that agent's Skillbox.
-  The owner picker and the assignee on the Work card must agree.
+  The owner picker and the assignee on the work item must agree.
 - **The message names too many skills for one agent.** At most eight skills fit
   in one request, and they become one prompt. Split the request if you need a
   second turn.

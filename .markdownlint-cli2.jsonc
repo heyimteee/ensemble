@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/DavidAnson/markdownlint-cli2/main/schema/markdownlint-cli2-config-schema.json",
+  "config": {
+    "default": false,
+    "MD001": true,
+    "MD003": { "style": "atx" },
+    "MD025": { "front_matter_title": "" },
+    "MD040": true
+  },
+  "globs": [
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "GLOSSARY.md",
+    "CHANGELOG.md",
+    "AGENTS.md",
+    "docs/**/*.md"
+  ],
+  "ignores": [
+    "docs/.vitepress/**",
+    "docs/public/**",
+    "docs/adr/**",
+    "docs/verification/**",
+    "docs/agents/**",
+    "docs/assessments/**",
+    "docs/compatibility/**",
+    "docs/implementation.md",
+    "AGENTS.md"
+  ]
+}

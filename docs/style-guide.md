@@ -212,7 +212,7 @@ Rules:
 - [ ] Moved entries are recorded in the redirect map.
 - [ ] The page has title, description, and version front matter; the H1 matches
       the title.
-- [ ] `npm run docs:check` passes, including its default docs-site build. The
-      explicit `--skip-site-build` mode exists for fixture tests, not the
-      release gate.
+- [ ] `npm run docs:check` passes, including its default docs-site build and
+      built-anchor crawl. CI runs `npm run docs:check:fast` in the separate Docs
+      job; the Docs site job owns the one PR site build.
 - [ ] `npm run verify` passes.

@@ -1,5 +1,9 @@
 # Ensemble
 
+[![npm version](https://img.shields.io/npm/v/@heyimteee/ensemble.svg)](https://www.npmjs.com/package/@heyimteee/ensemble)
+[![verify](https://github.com/heyimteee/ensemble/actions/workflows/verify.yml/badge.svg)](https://github.com/heyimteee/ensemble/actions/workflows/verify.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Your persistent agent team, inside OpenCode.**
 
 Ensemble gives you one group chat with named agents, a leader who routes the

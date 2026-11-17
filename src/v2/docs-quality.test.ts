@@ -9,6 +9,10 @@ import {
   parseFrontmatter,
   shellSyntaxFailures,
 } from "../../scripts/lib/docs-quality.ts"
+import {
+  anchorsFromRenderedHtml,
+  createRenderedAnchorResolver,
+} from "../../scripts/lib/rendered-anchors.mjs"
 
 test("frontmatter parses metadata and leaves the body", () => {
   const parsed = parseFrontmatter("---\ntitle: Quickstart\ndescription: Go from zero.\nversion: 0.1.x\n---\n\n# Quickstart\n")
@@ -48,6 +52,38 @@ test("page anchors include headings, custom HTML names, and duplicate suffixes",
     "```",
   ].join("\n"))
   assert.deepEqual([...anchors].sort(), ["legacy-anchor", "quickstart", "setup", "setup-1"])
+})
+
+test("VitePress rendered ids are the site contract, not GitHub slugs", async () => {
+  const resolve = await createRenderedAnchorResolver(".")
+  const anchors = resolve([
+    "## 2.2.7 re-verification",
+    "## Release — 0.1.0-rc.2 (released now)",
+    "## 🚀 Launch",
+    "## Composer · Insert",
+    "## Setup",
+    "## Setup",
+  ].join("\n\n"))
+  assert.ok(anchors.has("_2-2-7-re-verification"))
+  assert.ok(anchors.has("release-—-0-1-0-rc-2-released-now"))
+  assert.ok(anchors.has("🚀-launch"))
+  assert.ok(anchors.has("composer-·-insert"))
+  assert.ok(anchors.has("setup"))
+  assert.ok(anchors.has("setup-1"))
+  assert.notEqual(githubSlug("2.2.7 re-verification"), "_2-2-7-re-verification")
+})
+
+test("rendered anchors include explicit named anchors", async () => {
+  const resolve = await createRenderedAnchorResolver(".")
+  const anchors = resolve('<a name="legacy-anchor"></a>\n\n## Current heading\n')
+  assert.ok(anchors.has("legacy-anchor"))
+  assert.ok(anchors.has("current-heading"))
+})
+
+test("rendered HTML anchor extraction decodes attribute entities", () => {
+  const anchors = anchorsFromRenderedHtml('<h2 id="a&amp;b">x</h2><a name="quote&#39;s"></a>')
+  assert.ok(anchors.has("a&b"))
+  assert.ok(anchors.has("quote's"))
 })
 
 test("link extraction ignores fenced code and inline code", () => {

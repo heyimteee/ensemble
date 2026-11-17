@@ -47,7 +47,7 @@ repeat the same evidence.
 2. State the change, the comparison point, and one lens per reviewer. Ask each
    reviewer to report findings in the same shape so the leader can rank them.
 3. The leader delegates one work item per reviewer. Each delegation spends one
-   group and one command hop; the parent card reads **WAITING** while the reviews
+   group and one command hop; the parent work item reads **WAITING** while the reviews
    run.
 4. Each reviewer inspects the change in its own native session. If a reviewer
    needs a shell command, the host may ask for permission; resolve it in the
@@ -103,17 +103,17 @@ change behavior outside the ranked findings.
 
 ## What to watch in Work
 
-- **One card per reviewer.** Three lenses produce three cards. A missing card
+- **One work item per reviewer.** Three lenses produce three work items. A missing work item
   means that reviewer was not addressed.
-- **Parent WAITING.** The leader's card waits for its children. That is normal
+- **Parent WAITING.** The leader's work item waits for its children. That is normal
   coordination, not a stalled command.
 - **NEEDS YOU.** A reviewer's shell or Git command can trigger a host permission
   prompt. Resolve it or the review stays paused.
 - **The budget label.** A refusal names the exhausted layer. A review that needs
   more delegation should start a new command with the remaining question.
-- **FAILED versus STALLED.** A failed card has a native model or tool error; a
-  stalled card is a delivery or lease problem. Retry the stalled card and read
-  the failed card's native session.
+- **FAILED versus STALLED.** A failed work item has a native model or tool error; a
+  stalled work item is a delivery or lease problem. Retry the stalled work item and read
+  the failed work item's native session.
 - **Native session output.** Press `o` to confirm the reviewer read the intended
   branch or diff, not the wrong working tree.
 
@@ -125,7 +125,7 @@ change behavior outside the ranked findings.
 - The leader returns one ranked list with duplicates merged and unverified
   claims marked.
 - The reviewers do not edit the change during review.
-- The group transcript keeps the final review, and each card is in **HISTORY**
+- The group transcript keeps the final review, and each work item is in **HISTORY**
   as **REPLIED**.
 
 ## Pitfalls
@@ -153,7 +153,7 @@ change behavior outside the ranked findings.
 - [Turn an issue into a ticket](issue-to-ticket.md): turn accepted findings into
   scoped delivery work.
 - [Use the Work pane](../use-the-work-pane.md): retry, restart, and inspect the
-  review behind a card.
+  review behind a work item.
 - [Resolve an approval](../resolve-approvals.md): decide a host permission
   prompt.
 - [Dispatch budgets](../../concepts/dispatch-budgets.md): read a delegated

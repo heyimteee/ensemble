@@ -30,10 +30,12 @@ import { checkDocsMedia } from "./docs-media-check.mjs"
 import {
   extractLinks,
   fencedBlocks,
-  pageAnchors,
   parseFrontmatter,
   shellSyntaxFailures,
 } from "./lib/docs-quality.ts"
+import { createRenderedAnchorResolver } from "./lib/rendered-anchors.mjs"
+import { checkBuiltSiteAnchors } from "./lib/site-anchors.mjs"
+import { BASE, OUT_DIR } from "../docs/.vitepress/site-data.mjs"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -159,11 +161,20 @@ function checkVerificationIndex(root, failures) {
     failures.push("docs/verification: directory is missing")
     return
   }
+  // A filename in prose or a code span is not a navigation path. Only an
+  // actual Markdown/HTML link to the record satisfies the evidence contract.
+  const linked = new Set()
+  for (const link of extractLinks(index)) {
+    if (isExternalLink(link.href)) continue
+    const target = resolveMarkdownTarget(root, EVIDENCE_INDEX, link.href)
+    if (!target.file) continue
+    linked.add(slash(relative(root, target.file)))
+  }
   for (const name of readdirSync(directory).sort()) {
     if (!name.endsWith(".md")) continue
     const date = name.slice(0, 10)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < CURRENT_RECORD_FLOOR) continue
-    if (!index.includes(name)) {
+    if (!linked.has(`docs/verification/${name}`)) {
       failures.push(`${EVIDENCE_INDEX}: current verification record ${name} is not linked`)
     }
   }
@@ -500,7 +511,7 @@ function checkMarkdownStructure(root, failures) {
   }
 }
 
-function checkInternalLinks(root, failures) {
+async function checkInternalLinks(root, failures) {
   const pages = [
     "README.md",
     "CONTRIBUTING.md",
@@ -511,6 +522,16 @@ function checkInternalLinks(root, failures) {
     ...walkMarkdown(root),
   ]
   const anchorCache = new Map()
+  let renderedAnchors
+  try {
+    renderedAnchors = await createRenderedAnchorResolver(join(root, "docs"))
+  } catch (error) {
+    failures.push(
+      `docs-check: could not initialize the VitePress markdown renderer: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+    )
+    return
+  }
   for (const path of pages) {
     if (!existsSync(join(root, path))) continue
     const text = read(root, path, failures)
@@ -525,7 +546,7 @@ function checkInternalLinks(root, failures) {
       if (!target.hash || !target.file?.endsWith(".md")) continue
       let anchors = anchorCache.get(target.file)
       if (!anchors) {
-        anchors = pageAnchors(readFileSync(target.file, "utf8"))
+        anchors = renderedAnchors(readFileSync(target.file, "utf8"))
         anchorCache.set(target.file, anchors)
       }
       const anchor = decodePath(target.hash)
@@ -568,10 +589,11 @@ function runSiteBuild(root, failures) {
     encoding: "utf8",
     timeout: 10 * 60 * 1000,
     maxBuffer: 10 * 1024 * 1024,
+    env: { ...process.env, ENSEMBLE_DOCS_SITE_ANCHOR_CHECK: "0" },
   })
   if (result.error) {
     failures.push(`docs:site:build could not run: ${result.error.message}`)
-    return
+    return false
   }
   if (result.status !== 0) {
     const output = `${result.stderr ?? ""}\n${result.stdout ?? ""}`
@@ -581,10 +603,12 @@ function runSiteBuild(root, failures) {
       .slice(-12)
       .join(" | ")
     failures.push(`docs:site:build failed: ${output || `exit ${result.status}`}`)
+    return false
   }
+  return true
 }
 
-function checkDocs(root = REPO_ROOT, { skipSiteBuild = false } = {}) {
+async function checkDocs(root = REPO_ROOT, { skipSiteBuild = false } = {}) {
   const failures = []
   const version = ENSEMBLE_BLOCK_VERSION
   const hosts = [...SUPPORTED_OPENCODE_VERSIONS]
@@ -738,7 +762,7 @@ function checkDocs(root = REPO_ROOT, { skipSiteBuild = false } = {}) {
   checkPageInventory(root, failures)
   checkFrontmatter(root, failures)
   checkMarkdownStructure(root, failures)
-  checkInternalLinks(root, failures)
+  await checkInternalLinks(root, failures)
   checkVerificationIndex(root, failures)
   checkSupport(root, failures)
   for (const failure of checkReferenceDocs(root)) {
@@ -749,34 +773,45 @@ function checkDocs(root = REPO_ROOT, { skipSiteBuild = false } = {}) {
   }
 
   let siteBuild = "skipped"
+  let builtAnchors
   if (skipSiteBuild) {
     siteBuild = "skipped (--skip-site-build)"
   } else if (root !== REPO_ROOT) {
     siteBuild = "skipped (fixture root)"
   } else {
-    runSiteBuild(root, failures)
-    siteBuild = failures.some((failure) => failure.startsWith("docs:site:build")) ? "failed" : "ok"
+    const built = runSiteBuild(root, failures)
+    siteBuild = built ? "ok" : "failed"
+    if (built) {
+      // The renderer and this crawler are independent checks: the renderer
+      // catches source-level drift before a build, and the built HTML is the
+      // final user-visible anchor contract.
+      builtAnchors = checkBuiltSiteAnchors(join(root, "docs", ".vitepress", "dist"), { base: BASE })
+      for (const failure of builtAnchors.failures) {
+        failures.push(`built site: ${failure}`)
+      }
+    }
   }
 
-  return { failures, version, hosts, liveNode, siteBuild }
+  return { failures, version, hosts, liveNode, siteBuild, builtAnchors }
 }
 
 const help = process.argv.includes("--help") || process.argv.includes("-h")
 if (help) {
-  console.log(`Usage: node --experimental-strip-types scripts/docs-check.mjs [--root DIR] [--skip-site-build]
+  console.log(`Usage: node --experimental-strip-types scripts/docs-check.mjs [--root DIR] [--fast]
 
 Asserts that the current docs match the canonical contract, host, and Node
 versions, that the page inventory and frontmatter are complete, that every
-internal link and anchor resolves, that Markdown fences and shell samples are
-valid, that every verification record from ${CURRENT_RECORD_FLOOR} onward is
-linked from ${EVIDENCE_INDEX}, and that the generated reference is current.
-The default runs the VitePress docs-site build; --skip-site-build is the
-explicit fast mode used by fixture tests and is not the CI gate.
+internal link and VitePress-rendered anchor resolves, that Markdown fences and
+shell samples are valid, that every verification record from ${CURRENT_RECORD_FLOOR}
+onward is linked from ${EVIDENCE_INDEX}, and that the generated reference and
+media are current. The default runs the VitePress docs-site build, then crawls
+the built HTML anchors independently. --fast (or --skip-site-build) explicitly
+skips both site steps for the separate CI docs job and fixture tests.
 Exits 1 on any stale or missing claim.`)
 } else {
   try {
     const args = parseArgs(process.argv.slice(2))
-    const { failures, version, hosts, liveNode, siteBuild } = checkDocs(args.root, {
+    const { failures, version, hosts, liveNode, siteBuild, builtAnchors } = await checkDocs(args.root, {
       skipSiteBuild: args.skipSiteBuild,
     })
     if (failures.length > 0) {
@@ -784,10 +819,13 @@ Exits 1 on any stale or missing claim.`)
       console.error(`docs:check: ${failures.length} stale or missing claim(s)`)
       process.exitCode = 1
     } else {
+      const anchorSummary = builtAnchors
+        ? `; built anchors ${builtAnchors.anchors}/${builtAnchors.links} links`
+        : ""
       console.log(
         `docs:check: ok (contract v${version}; OpenCode ${hosts.join(", ")}; `
           + `Node >=${MINIMUM_NODE_VERSION}; live Node ${liveNode || "unset"}; `
-          + `site build: ${siteBuild})`,
+          + `site build: ${siteBuild}${anchorSummary})`,
       )
     }
   } catch (error) {

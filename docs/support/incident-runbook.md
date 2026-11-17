@@ -22,7 +22,7 @@ OpenCode storage.
 |---|---|---|
 | SEV1 | Data loss or corruption, credential exposure, a vulnerability with a plausible exploit, all workspaces unusable | Stop using the affected host, preserve evidence, use the private security route for anything security-related, and escalate to the maintainer immediately |
 | SEV2 | One workspace cannot load, work is stuck for all agents, an upgrade broke the install, repeated service restarts | Preserve logs, try the rollback path, and file one issue with the diagnostic bundle |
-| SEV3 | One agent or one card misbehaves, cosmetic or recoverable mismatch, unsupported platform behavior | Collect diagnostics, use the workaround, and file a normal issue |
+| SEV3 | One agent or one work item misbehaves, cosmetic or recoverable mismatch, unsupported platform behavior | Collect diagnostics, use the workaround, and file a normal issue |
 
 **First response, in order:**
 
@@ -31,7 +31,7 @@ OpenCode storage.
 2. Record the time, the exact Ensemble version, the OpenCode version, and what
    changed since the last good run.
 3. Copy the diagnostic evidence described in [Diagnostics](#diagnostics).
-4. Choose the smallest reversible action: retry the card, restart the client,
+4. Choose the smallest reversible action: retry the work item, restart the client,
    downgrade the package, or restore a backup. Do not combine actions in one
    step; a failed repair destroys the evidence for the next attempt.
 5. Decide whether the incident is security-related. If it is, stop and follow

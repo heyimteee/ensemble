@@ -15,12 +15,15 @@ import { createHash } from "node:crypto"
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
+import { privateIdentity } from "./lib/privacy.mjs"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const MANIFEST = "docs/public/media/MANIFEST.json"
 const MEDIA_PREFIX = "/media/"
-const ASSET_FORBIDDEN = ["/home/", "/Users/", "tristan", "C:\\\\", "fake-rich-fixture", "RICH_CODE_MARKER", "fake-ask-person"]
-const PAGE_FORBIDDEN = ["/home/tristan", "/Users/tristan", "tristan", "fake-rich-fixture", "RICH_CODE_MARKER", "fake-ask-person"]
+const IDENTITY = privateIdentity()
+const FIXTURE_FORBIDDEN = ["fake-rich-fixture", "RICH_CODE_MARKER", "fake-ask-person"]
+const ASSET_FORBIDDEN = ["/home/", "/Users/", "C:\\\\", ...IDENTITY.markers, ...FIXTURE_FORBIDDEN]
+const PAGE_FORBIDDEN = [...IDENTITY.markers, ...FIXTURE_FORBIDDEN]
 const USER_SECTIONS = [
   "getting-started",
   "concepts",

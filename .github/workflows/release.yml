@@ -2,8 +2,8 @@ name: Release
 
 # Ticket #275: a version tag is the only trigger that can publish. The manual
 # dispatch always runs as a dry run: verify, docs:check, build, pack, and
-# `npm publish --dry-run` with no registry secret. The real publish adds
-# provenance through OIDC and the NPM_TOKEN secret, then creates the GitHub
+# `npm publish --dry-run` with no registry secret. The real publish uses npm
+# trusted publishing through OIDC with provenance, then creates the GitHub
 # release from the changelog notes and the CycloneDX SBOM. A plain branch push
 # cannot reach the publish jobs.
 

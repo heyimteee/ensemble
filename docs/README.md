@@ -21,13 +21,13 @@ separate docs tree.
 <TerminalHero
   src="/media/hero-terminal.cast"
   poster="/media/workspace-shell.png"
-  poster-alt="The Ensemble three-pane workspace in the synthetic Acme Notes fixture: agents in the rail, a working Ada card in Work, and a group message in chat."
-  caption="A scripted replay of the isolated synthetic fixture. The install command is illustrative; the workspace, message, Work card, and native session were captured from the local host."
-  title="Ensemble terminal replay: install, launch, group message, Work card, and native session"
+  poster-alt="The Ensemble three-pane workspace in the synthetic Acme Notes fixture: agents in the rail, a working Ada work item in Work, and a group message in chat."
+  caption="A scripted replay of the isolated synthetic fixture. The install command is illustrative; the workspace, message, work item, and native session were captured from the local host."
+  title="Ensemble terminal replay: install, launch, group message, work item, and native session"
 />
 
 The replay covers the stable install command, `/ensemble`, a group message, the
-Work card, and the native session underneath. Read the
+work item, and the native session underneath. Read the
 [quickstart](getting-started/quickstart.md) for the same path as copyable steps,
 or the [workspace shell](concepts/workspace-shell.md) for the pane model.
 
@@ -144,7 +144,9 @@ navigation.
 - [Changelog](../CHANGELOG.md): stable and prerelease history.
 
 `npm run docs:check` validates the page inventory and frontmatter, internal
-links and anchors, Markdown and shell fences, the current contract, host, and
-Node claims, generated-reference freshness, and the docs site build. It also
-keeps every docs section reachable from this home and requires every current
-verification record to be linked from the evidence index.
+links and VitePress-rendered anchors, Markdown and shell fences, the current
+contract, host, and Node claims, generated-reference freshness, the docs site
+build, and the built-site anchor crawl. CI runs `npm run docs:check:fast` in the
+Docs job and the separate Docs site job owns the one PR build. The full gate
+also keeps every docs section reachable from this home and requires every
+current verification record to be linked from the evidence index.

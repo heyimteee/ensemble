@@ -26,10 +26,11 @@ python3 -c 'import PIL' >/dev/null 2>&1 \
   || live_fail "Pillow is required for manual media regeneration (pip install Pillow)"
 
 live_setup "docs-media"
-# Keep the workspace path short enough for the chat header at 110 columns. It is
-# still an isolated temporary directory, created and removed by this script.
-LIVE_PROJECT="/tmp/opencode/acme-notes"
-rm -rf "$LIVE_PROJECT"
+# The workspace lives inside the isolated HOME created by live_setup. The TUI
+# renders it as ~/dev/acme-notes, so no host path or username reaches a frame.
+# live_setup's EXIT trap owns cleanup; this script never deletes a path it did
+# not create.
+LIVE_PROJECT="$LIVE_HOME/dev/acme-notes"
 mkdir -p "$LIVE_PROJECT/notes"
 git -C "$LIVE_PROJECT" init -q
 cat >"$LIVE_PROJECT/README.md" <<'EOF'
@@ -230,14 +231,25 @@ redact() {
   local shown="$1" length="$2"
   printf '%s%*s' "$shown" $((length - ${#shown})) ''
 }
-project_fragment="/tmp/opencode/acme-"
-rail_fragment="opencode/acme-not…"
 replace_args=(
   "$LIVE_PROJECT=$(redact '~/dev/acme-notes' "${#LIVE_PROJECT}")"
-  "$project_fragment=$(redact '~/dev/acme-' "${#project_fragment}")"
-  "$rail_fragment=$(redact 'dev/acme-notes…' "${#rail_fragment}")"
-  "/tmp/opencode/=$(redact '~/dev/' 14)"
+  "$LIVE_HOME=$(redact '~' "${#LIVE_HOME}")"
 )
+# The check derives the current account, home, and host at run time; no
+# contributor identity is committed in this script or its fixtures.
+identity_user="${USER:-$(id -un 2>/dev/null || true)}"
+identity_host="$(hostname 2>/dev/null || true)"
+privacy_forbid=(
+  --forbid "/home/"
+  --forbid "/Users/"
+  --forbid "${TMPDIR:-/tmp}/opencode/"
+)
+for marker in "$identity_user" "$identity_host" "${HOME:-}" "${HOME##*/}" \
+  "$LIVE_BASE" "$LIVE_HOME" "$LIVE_PROJECT"; do
+  if [[ -n "$marker" && ${#marker} -ge 3 ]]; then
+    privacy_forbid+=(--forbid "$marker")
+  fi
+done
 render_image() {
   local name="$1" source="$2" font="$3" crop="${4:-}"
   local args=(
@@ -249,14 +261,12 @@ render_image() {
     --font-size "$font"
     --replace "${replace_args[0]}"
     --replace "${replace_args[1]}"
-    --replace "${replace_args[2]}"
-    --replace "${replace_args[3]}"
     --forbid "/home/"
     --forbid "/tmp/opencode/"
-    --forbid "tristan"
     --forbid "fake-rich-fixture"
     --forbid "RICH_CODE_MARKER"
     --forbid "fake-ask-person"
+    "${privacy_forbid[@]}"
   )
   if [[ -n "$crop" ]]; then args+=(--crop "$crop"); fi
   python3 "$SCRIPT_DIR/docs-media-render.py" "${args[@]}"
@@ -272,10 +282,9 @@ render_image_wide() {
     --crop "$crop" \
     --replace "${replace_args[0]}" \
     --replace "${replace_args[1]}" \
-    --replace "${replace_args[2]}" \
-    --replace "${replace_args[3]}" \
-    --forbid "/home/" --forbid "/tmp/opencode/" --forbid "tristan" \
-    --forbid "fake-rich-fixture" --forbid "RICH_CODE_MARKER" --forbid "fake-ask-person"
+    --forbid "/home/" --forbid "/tmp/opencode/" \
+    --forbid "fake-rich-fixture" --forbid "RICH_CODE_MARKER" --forbid "fake-ask-person" \
+    "${privacy_forbid[@]}"
 }
 render_image_wide work-active.png work-active-wide 24 "86,5,139,22"
 render_image_wide work-history.png work-history-wide 24 "86,5,139,22"
@@ -300,15 +309,12 @@ python3 "$SCRIPT_DIR/docs-media-render.py" cast \
   --title "Ensemble synthetic Acme Notes replay" \
   --replace "${replace_args[0]}" \
   --replace "${replace_args[1]}" \
-  --replace "${replace_args[2]}" \
-  --replace "${replace_args[3]}" \
   --forbid "/home/" \
   --forbid "/tmp/opencode/" \
-  --forbid "tristan" \
   --forbid "fake-rich-fixture" \
   --forbid "RICH_CODE_MARKER" \
-  --forbid "fake-ask-person"
+  --forbid "fake-ask-person" \
+  "${privacy_forbid[@]}"
 
 "$LIVE_NODE_BIN" "$SCRIPT_DIR/docs-media-manifest.mjs" --media "$MEDIA_DIR"
 live_log "docs media regenerated in docs/public/media"
-rm -rf "$LIVE_PROJECT"
