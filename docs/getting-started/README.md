@@ -27,10 +27,12 @@ boundary and known limitations before you start.
 
 ## If a step fails
 
-Start with the troubleshooting section on the page you are on. If the symptom is
-not listed, read the [support policy](../support/README.md) before filing an
-issue, and use the [incident runbook](../support/incident-runbook.md) for a
-broken workspace, stuck work, or suspected data loss.
+Start with the troubleshooting section on the page you are on, then read
+[Troubleshooting](../support/troubleshooting.md) for install, plugin, workspace,
+work, native-turn, and model symptoms. If the symptom is not listed, read the
+[support policy](../support/README.md) before filing an issue, and use the
+[incident runbook](../support/incident-runbook.md) for a broken workspace, stuck
+work, or suspected data loss.
 
 ## Next
 

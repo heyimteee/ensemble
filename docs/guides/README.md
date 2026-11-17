@@ -45,14 +45,17 @@ These existing pages cover recovery and upgrade paths:
 
 ## Recipes
 
-Recipes apply Ensemble to a real workflow. Each recipe will state the goal, the
+Recipes apply Ensemble to a real workflow. Each recipe states the goal, the
 actors, example prompts, what to watch in the Work pane, expected output, and
-pitfalls. Planned recipes:
+pitfalls. Start with the [recipe index](recipes/README.md), or go straight to a
+workflow:
 
-- Parallel research with a leader and two researchers.
-- Multi-agent code review with separate reviewers.
-- Turn a GitHub issue into an implementation ticket.
-- Use an agent-scoped skill without leaking it to the team.
+| Workflow | Recipe |
+|---|---|
+| Split one research question across two agents and combine the findings | [Run parallel research](recipes/parallel-research.md) |
+| Review one change through separate correctness, security, and test lenses | [Run a multi-agent code review](recipes/multi-agent-code-review.md) |
+| Turn an issue into a scoped implementation ticket | [Turn an issue into a ticket](recipes/issue-to-ticket.md) |
+| Use one agent's skill without leaking it to the team | [Use an agent-scoped skill](recipes/agent-scoped-skills.md) |
 
 ## Writing a guide
 

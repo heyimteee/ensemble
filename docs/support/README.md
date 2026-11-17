@@ -6,6 +6,16 @@ Issues**. There is no paid support, private inbox, or contractual SLA.
 Use this page to choose the right channel, collect evidence, and keep private
 data out of public reports.
 
+## Self-service first
+
+Start with the symptom guide or the boundary question before you file:
+
+| Need | Page |
+|---|---|
+| Fix an install, duplicate plugin, no-workspace, stuck-work, native-timeout, or missing-model problem | [Troubleshooting](troubleshooting.md) |
+| Check npm tags, Git installs, Windows, macOS/Herdr, copy-on-select, or diagnostics | [FAQ](faq.md) |
+| Find support, recovery, security, privacy, backup, upgrade, and rollback in one place | [Operations and support](operations.md) |
+
 ## Where to get help
 
 | Need | Channel |
