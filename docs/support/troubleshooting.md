@@ -127,7 +127,7 @@ and the workspace still does not appear, follow the
 
 ## Stuck or needs-you work
 
-**Symptom:** a card stays in **ACTIVE**, never reaches **HISTORY**, or reads
+**Symptom:** a work item stays in **ACTIVE**, never reaches **HISTORY**, or reads
 **NEEDS YOU**.
 
 Status is a signal, not a verdict. Read the word before you act:
@@ -145,14 +145,14 @@ Status is a signal, not a verdict. Read the word before you act:
 
 For **NEEDS YOU**, check for a pending approval. **Resume work** continues an
 interrupted run once; **Discard** marks it failed. If no approval is attached,
-restart the card with `R` or cancel it with `x`. An approval cannot override a
+restart the work item with `R` or cancel it with `x`. An approval cannot override a
 host tool permission and does not become a permanent grant.
 
 For a stuck queue, open `:logs` and use `:logs failures` or
 `:logs task <id>`. The viewer shows the sink paths and counters. Keep content
 logging off; do not enable `ENSEMBLE_LOG_CONTENT=1` for a report.
 
-**Expected result:** the card either replies, is cancelled, or moves to a
+**Expected result:** the work item either replies, is cancelled, or moves to a
 specific failure you can explain. If it returns to **STALLED** after a retry, or
 several agents are stuck at once, stop retrying and use the
 [incident runbook](incident-runbook.md#symptom-guide).
@@ -169,31 +169,31 @@ bounded interval and does not mark a turn interrupted on elapsed time alone. A
 slow model, a long tool call, or a background subagent can all look silent while
 still being alive.
 
-1. Press `o` on the card and read the native session. Look for a final assistant
+1. Press `o` on the work item and read the native session. Look for a final model
    message, a pending tool call, or a host permission prompt.
 2. Return with `F2`. If an interrupted-work approval is attached, press `v` and
    choose **Resume work** or **Discard**. Resume continues the work once;
    discard marks it failed.
-3. If the card reads **NEEDS YOU** with no approval, press `R` to restart it from
+3. If the work item reads **NEEDS YOU** with no approval, press `R` to restart it from
    a clean stopped state, or `x` to cancel it. Do not restart the service, delete
    state, or resend the prompt while the host may still be running it. A second
    run can duplicate tool side effects.
 4. If the turn was already answered in the native transcript, let the recovered
-   answer settle the card. A recovered answer supersedes an earlier retry or
+   answer settle the work item. A recovered answer supersedes an earlier retry or
    interruption notice.
 5. If the same session times out repeatedly, record the host version, the model,
    the last tool activity, and the `:logs task <id>` timeline, then follow the
    [incident runbook](incident-runbook.md).
 
-**Expected result:** either the answer appears and the card moves to **REPLIED**,
+**Expected result:** either the answer appears and the work item moves to **REPLIED**,
 or you deliberately restart, resume, discard, or cancel the interrupted work. A
-card that still reads **NEEDS YOU** has an interrupted run or an unresolved
+work item that still reads **NEEDS YOU** has an interrupted run or an unresolved
 approval, not a second timeout.
 
 ## Missing model
 
 **Symptom:** the agent wizard says `No models are available`, a model picker
-rejects the selected model, a card stays **QUEUED**, or a turn fails with a model
+rejects the selected model, a work item stays **QUEUED**, or a turn fails with a model
 availability error.
 
 1. Confirm a provider and model exist in OpenCode. Ensemble reads the host
@@ -207,7 +207,7 @@ availability error.
    the switch in the transcript.
 5. If the transcript says `Model unavailable; switched to ...`, the fallback
    worked. Make the fallback deliberate rather than relying on a single model.
-6. Retry a failed card after the model is fixed. A queued card can start once its
+6. Retry a failed work item after the model is fixed. A queued work item can start once its
    assignee has a usable model.
 
 **Expected result:** the picker lists models, every member has a main model, and
@@ -219,7 +219,7 @@ If the host still reports no models, collect the OpenCode provider configuration
 
 You can name the failing layer, the check that confirmed it, and the smallest
 action you took. The plugin list has one entry, the workspace is visible, or the
-work item has a deliberate outcome instead of an unexplained **ACTIVE** card.
+work item has a deliberate outcome instead of an unexplained **ACTIVE** work item.
 
 ## Next
 

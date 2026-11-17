@@ -60,9 +60,19 @@ function repositoryUrl(target, hash) {
  */
 function escapePlaceholderHtml(md) {
   const previous = md.renderer.rules.html_inline
+  // Cross-reference aliases are the one raw HTML construct docs need: a
+  // heading's GitHub slug and VitePress slug can differ (numeric versions,
+  // em dashes, punctuation). <a name="..."></a> gives both tools one explicit
+  // target without changing the visible heading. Everything else is escaped
+  // so placeholders such as `<name>` render as text.
+  const namedAnchor = /^<a\s+(?:name|id)="[A-Za-z0-9_:.-]+"\s*>$/i
   md.renderer.rules.html_inline = (tokens, index, options, env, self) => {
     const content = tokens[index].content
-    if (/^<(?:br|wbr)\s*\/?>$/i.test(content)) {
+    if (
+      /^<(?:br|wbr)\s*\/?>$/i.test(content) ||
+      namedAnchor.test(content) ||
+      content === "</a>"
+    ) {
       return previous
         ? previous(tokens, index, options, env, self)
         : content

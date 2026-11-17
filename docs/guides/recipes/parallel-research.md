@@ -43,9 +43,9 @@ The names are synthetic. Use your own roster.
 2. Send one command that names the two tracks and asks for a combined answer.
    Give each track a different question, a source boundary, and an output shape.
 3. The leader either delegates two work items or answers alone. A delegation
-   creates a child work item per researcher, and the parent card reads
+   creates a child work item per researcher, and the parent work item reads
    **WAITING** until both settle.
-4. Watch both cards in **ACTIVE**. Open a native session with `o` when you need
+4. Watch both work items in **ACTIVE**. Open a native session with `o` when you need
    to see which files or commands produced a claim.
 5. When both researchers reply, the leader synthesizes if synthesis is enabled.
    If it is not, ask for the synthesis as a new command after the two briefs
@@ -96,20 +96,20 @@ winner until both answer.
 
 ## What to watch in Work
 
-- **Two cards, not one.** Each researcher owns one work item. If only the leader
-  card exists, the leader answered alone; send the direct `$Name` form or ask it
+- **Two work items, not one.** Each researcher owns one work item. If only the leader
+  work item exists, the leader answered alone; send the direct `$Name` form or ask it
   to delegate explicitly.
-- **Parent WAITING.** A coordinated command shows the leader card **WAITING**
-  while the child cards run. That is the correct state, not a stuck command.
+- **Parent WAITING.** A coordinated command shows the leader work item **WAITING**
+  while the child work items run. That is the correct state, not a stuck command.
 - **The budget label.** `hops 3/8 · cmd 21 left` means the group has spent three
   of eight hops. A refusal names the exhausted layer; start a new command rather
   than forcing a continuation you do not need.
-- **NEEDS YOU.** A host permission request pauses the related card until you
+- **NEEDS YOU.** A host permission request pauses the related work item until you
   resolve it with `v`. Approving an Ensemble approval does not grant a host tool
   permission permanently.
-- **STALLED versus FAILED.** Retry a stalled card; inspect a failed card's native
+- **STALLED versus FAILED.** Retry a stalled work item; inspect a failed work item's native
   session for the model or tool error.
-- **One native session per researcher.** Press `o` on each card to compare what
+- **One native session per researcher.** Press `o` on each work item to compare what
   each agent actually read.
 
 ## Expected result
@@ -118,7 +118,7 @@ winner until both answer.
   questions.
 - The leader produces one combined answer that names agreement, disagreement,
   and the next check, or you ask for that synthesis explicitly.
-- Both child cards move to **HISTORY** as **REPLIED**, and the group transcript
+- Both child work items move to **HISTORY** as **REPLIED**, and the group transcript
   holds the final answer.
 - The two briefs are independent: neither researcher repeats the other's scope.
 
@@ -136,12 +136,12 @@ winner until both answer.
   remaining question instead of restating the whole brief.
 - **One provider rate-limits both agents.** Parallel work shares your provider
   quota. Add backup models or stagger the two tracks.
-- **A card sits in NEEDS YOU.** A host permission or an interrupted run is
+- **A work item sits in NEEDS YOU.** A host permission or an interrupted run is
   waiting for your decision. Resolve it in the approvals inbox; retrying does not
   grant the missing permission.
 - **A native turn looks silent for minutes.** Do not restart on time alone. Open
   the native session with `o`; if the host never settled the turn, Ensemble marks
-  it interrupted. Restart the card with `R`, or resolve the interrupted-work
+  it interrupted. Restart the work item with `R`, or resolve the interrupted-work
   approval with `v` when one is attached.
 
 ## Next

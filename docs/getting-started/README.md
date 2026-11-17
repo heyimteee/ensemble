@@ -7,7 +7,8 @@ version: 0.1.x
 # Getting started
 
 Install Ensemble, open the workspace, and reach your first group reply with a
-small agent team. The path takes about ten minutes.
+small agent team. The automated packed-install smoke completes this path in about
+half a minute; a person's install and model latency will differ.
 
 ## Before you install
 

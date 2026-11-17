@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto"
 import { readFileSync, statSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { privateIdentity } from "./lib/privacy.mjs"
 
 const ASSETS = [
   { file: "workspace-shell.png", kind: "screenshot" },
@@ -27,7 +28,7 @@ const FORBIDDEN = [
   "/home/",
   "/Users/",
   "/tmp/opencode/",
-  "tristan",
+  ...privateIdentity().markers,
   "fake-rich-fixture",
   "RICH_CODE_MARKER",
   "QUEUE_HOLD_MARKER",

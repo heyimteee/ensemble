@@ -30,7 +30,7 @@ tools, providers, permissions, and skills.
 
 <DocsFigure
   src="/media/native-session.png"
-  alt="Ada's native OpenCode session opened from a Work card, showing the user request, the rendered Acme Notes release note, and the Build footer."
+  alt="Ada's native OpenCode session opened from a work item, showing the user request, the rendered Acme Notes release note, and the Build footer."
   caption="The native session is where the agent runs. Press o to open the assignee's session; press F2 to return to Ensemble."
   width="1100"
   height="680"

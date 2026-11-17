@@ -53,7 +53,7 @@ runtime warning. That warning is a boundary notice, not a compatibility pass.
 | Surface | Supported | Notes |
 |---|---|---|
 | 80x24 (minimum tested) | Yes | The smallest tested layout; Work becomes a right drawer below 96 columns |
-| 100x30, 120x40, 160x50 | Yes | Covered by the size matrix and the Work-card fit checks |
+| 100x30, 120x40, 160x50 | Yes | Covered by the size matrix and the work-item fit checks |
 | Fewer than 80 columns or fewer than 24 rows | Untested | No support claim |
 | Truecolor terminal | Yes | The default experience |
 | `NO_COLOR=1` | Yes | Color decoration is suppressed; state text and glyphs remain |

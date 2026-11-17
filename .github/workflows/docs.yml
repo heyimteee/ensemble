@@ -4,10 +4,12 @@ name: Docs
 # host, and Node constants and fails when the current docs claim a stale
 # version, the user navigation drops a docs section, a current verification
 # record is missing from the evidence index, a page loses required frontmatter,
-# an internal link or anchor breaks, or the generated reference or docs-site
-# build drifts. Ticket #310 keeps this job separate from the Node and host
-# matrices; the default `docs:check` includes the VitePress build, while unit
-# fixture tests use the explicit `--skip-site-build` fast mode.
+# an internal link or rendered anchor breaks, or the generated reference or
+# media drifts. Ticket #310 keeps this job separate from the Node and host
+# matrices. Ticket #301 review corrections split the gate: this fast job runs
+# Markdown lint and the docs contract without a VitePress build, while the
+# separate Docs site workflow owns the one PR site build. `npm run docs:check`
+# remains the full local acceptance gate, including the built-site anchor scan.
 
 on:
   push:
@@ -20,7 +22,7 @@ jobs:
   docs:
     name: docs:check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -28,4 +30,4 @@ jobs:
           node-version: "26.12.1"
           cache: npm
       - run: npm ci
-      - run: npm run docs:check
+      - run: npm run docs:check:fast

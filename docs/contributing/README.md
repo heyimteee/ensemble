@@ -32,20 +32,30 @@ docs index.
 
 Build the docs site locally with `npm run docs:site` and publish-preview it with
 `npm run docs:site:preview`. `npm run docs:site:build` runs the sidebar,
-reachability, redirect, SEO, sitemap, and generated-artifact checks before the
-VitePress build. `npm run docs:check` is the full docs gate: inventory,
-frontmatter, links and anchors, Markdown fences, shell syntax, canonical
-version/host/Node claims, generated reference freshness, media, and the
-VitePress build. Fixture tests use the explicit `--skip-site-build` mode; CI
-runs the full check.
+reachability, redirect, SEO, sitemap, generated-artifact, and built-anchor checks
+before the VitePress build. `npm run docs:check` is the full local gate:
+Markdown lint, inventory, frontmatter, links and rendered anchors, Markdown
+fences, shell syntax, canonical version/host/Node claims, generated reference
+freshness, media, the VitePress build, and the built-site anchor crawl. CI runs
+`npm run docs:check:fast` in the separate Docs job; the Docs site job owns the
+single VitePress build. Fixture tests use the explicit `--skip-site-build`
+mode.
 
 Update user documentation when externally visible behavior changes. If no doc
 update is needed, put a `docs-not-needed: <reason>` line in the pull request
 body; the `docs-rationale` workflow checks the changed-file list and PR body
-from the trusted base checkout. Keep ADRs and verification records public, but
-do not put them in the primary user navigation; link them from the
-[evidence index](evidence.md) or as a **Go deeper** link at the end of a
-concept page.
+from the trusted base checkout. It is not yet a required status check on
+`main`: adding it needs an explicit maintainer decision and a GitHub ruleset
+change, which this repository does not configure. Until then the workflow is
+advisory and the program merge can proceed without claiming external
+enforcement. Keep ADRs and verification records public, but do not put them in
+the primary user navigation; link them from the [evidence index](evidence.md)
+or as a **Go deeper** link at the end of a concept page.
+
+The Docs site workflow builds the Pages artifact on pull requests and deploys
+only from `main` after the repository's Pages environment is enabled. Enabling
+Pages and publishing the site are external maintainer actions; this branch
+does not deploy the site or claim that it is live.
 
 ## Review and process
 

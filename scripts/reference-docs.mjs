@@ -1566,7 +1566,9 @@ export const CLI_DOCS = [
 
 export const MAINTAINER_COMMANDS = [
   ["issue:hygiene", "Read-only GitHub listing of parent issues whose sub-issues are all closed. Never edits or closes issues."],
-  ["docs:check", "Page inventory, frontmatter, links and anchors, Markdown and shell syntax, contract/host/Node claims, generated reference, media, and docs-site build."],
+  ["docs:check", "Full local docs gate: Markdown lint, page inventory, frontmatter, links and VitePress-rendered anchors, shell syntax, contract/host/Node claims, generated reference, media, docs-site build, and built-anchor crawl."],
+  ["docs:check:fast", "Pull-request docs gate: Markdown lint and source checks without the VitePress build; the Docs site workflow owns the site build."],
+  ["docs:lint", "Run markdownlint-cli2 with the repository's minimal structural rules."],
   ["docs:reference", "Regenerate the reference pages from the code catalogs."],
   ["verify", "Typecheck plus the unit test suite."],
   ["test", "Unit tests only."],
@@ -1574,6 +1576,7 @@ export const MAINTAINER_COMMANDS = [
   ["build", "Build the published package."],
   ["check:build", "Build plus the published-file check."],
   ["docs:reference:check", "Standalone generated-reference check."],
+  ["docs:site:anchors", "Crawl the built VitePress HTML and validate every internal fragment target."],
   ["test:live:*", "Live, fake, install, latency, lifecycle, and subagent verification suites."],
   ["benchmark:*", "Tool-surface and synthesis benchmarks."],
   ["soak", "The four-hour enforced fake-host soak gate; nightly or opt-in."],

@@ -45,7 +45,7 @@ will not, and how a reviewer will know it worked.
 2. Give the leader the issue reference, the repository, and the ticket shape you
    want. Ask for facts before drafting.
 3. The leader delegates the issue-and-code read to Grace and the draft to Linus.
-   Each delegation creates a child work item; the parent card reads **WAITING**.
+   Each delegation creates a child work item; the parent work item reads **WAITING**.
 4. Grace reports what the issue asks for, what the comments change, which files
    or behaviors are involved, and what cannot be reproduced. Grace cites the
    issue section or file rather than paraphrasing silently.
@@ -99,19 +99,19 @@ source issue. Report the new issue number.
 
 ## What to watch in Work
 
-- **One card for the read and one for the draft.** The two work items have
-  different jobs. If only one card exists, the leader collapsed the work and the
+- **One work item for the read and one for the draft.** The two work items have
+  different jobs. If only one work item exists, the leader collapsed the work and the
   facts may not have been checked.
 - **Parent WAITING.** The leader waits for the child that supplies facts or the
   draft. A waiting parent is coordination, not a stall.
 - **NEEDS YOU.** A `gh` command, a file read outside the workspace, or another
-  host permission can pause the card. Resolve it or the ticket stays incomplete.
-- **Native session evidence.** Press `o` on Grace's card to confirm the issue
-  comments were read, not only the title. Press `o` on Linus's card to see the
+  host permission can pause the work item. Resolve it or the ticket stays incomplete.
+- **Native session evidence.** Press `o` on Grace's work item to confirm the issue
+  comments were read, not only the title. Press `o` on Linus's work item to see the
   files the draft relies on.
 - **Budget label.** A refusal names the exhausted layer. Drafting a large ticket
   does not need a long relay; start a new command with the remaining section.
-- **STALLED versus FAILED.** Retry a stalled card. Read a failed card's native
+- **STALLED versus FAILED.** Retry a stalled work item. Read a failed work item's native
   session for the missing command, authentication error, or model problem.
 
 ## Expected result

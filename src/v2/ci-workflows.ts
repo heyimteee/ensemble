@@ -52,6 +52,7 @@ const LIVE_HOST_ACTION = ".github/actions/live-host/action.yml"
 const COMPATIBILITY_WORKFLOW = ".github/workflows/compatibility.yml"
 const NODE_MATRIX_WORKFLOW = ".github/workflows/node-matrix.yml"
 const DOCS_WORKFLOW = ".github/workflows/docs.yml"
+const DOCS_SITE_WORKFLOW = ".github/workflows/docs-site.yml"
 const DOCS_RATIONALE_WORKFLOW = ".github/workflows/docs-rationale.yml"
 const RELEASE_WORKFLOW = ".github/workflows/release.yml"
 const LATENCY_WORKFLOW = ".github/workflows/latency.yml"
@@ -641,6 +642,7 @@ export function checkCiRepository(
   const compatibility = readWorkflow(root, COMPATIBILITY_WORKFLOW, failures)
   const nodeMatrix = readWorkflow(root, NODE_MATRIX_WORKFLOW, failures)
   const docs = readWorkflow(root, DOCS_WORKFLOW, failures)
+  const docsSite = readWorkflow(root, DOCS_SITE_WORKFLOW, failures)
   const docsRationale = readWorkflow(root, DOCS_RATIONALE_WORKFLOW, failures)
   const release = readWorkflow(root, RELEASE_WORKFLOW, failures)
 
@@ -665,8 +667,17 @@ export function checkCiRepository(
       }
     }
   }
-  if (docs && !docs.includes("npm run docs:check")) {
-    failures.push(`${DOCS_WORKFLOW}: missing npm run docs:check`)
+  if (docs && !docs.includes("npm run docs:check:fast")) {
+    failures.push(`${DOCS_WORKFLOW}: missing npm run docs:check:fast`)
+  }
+  if (docs && /npm run docs:check\s*$/m.test(docs)) {
+    failures.push(`${DOCS_WORKFLOW}: the PR docs job must not build the site; use docs:check:fast`)
+  }
+  if (docsSite && !docsSite.includes("npm run docs:site:build")) {
+    failures.push(`${DOCS_SITE_WORKFLOW}: missing npm run docs:site:build`)
+  }
+  if (docsSite && /npm run docs:check(?![:\w])/.test(docsSite)) {
+    failures.push(`${DOCS_SITE_WORKFLOW}: must not duplicate the fast docs:check gate`)
   }
   return failures
 }

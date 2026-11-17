@@ -231,11 +231,17 @@ test("the repository keeps the compatibility, Node, and docs workflows and drops
   assert.equal(existsSync(join(repoRoot, ".github/workflows/latency.yml")), false)
 })
 
-test("the docs job installs dependencies and runs the full docs check, including the site build", () => {
+test("the docs job runs the fast gate while the docs-site job owns the one PR build", () => {
   const text = read(".github/workflows/docs.yml")
   assert.match(text, /run: npm ci/)
-  assert.match(text, /run: npm run docs:check/)
-  assert.doesNotMatch(text, /run: .*--skip-site-build/)
+  assert.match(text, /run: npm run docs:check:fast/)
+  assert.doesNotMatch(text, /run: npm run docs:check\s*$/)
+  assert.doesNotMatch(text, /docs:site:build/)
+  assert.doesNotMatch(text, /--skip-site-build/)
+
+  const site = read(".github/workflows/docs-site.yml")
+  assert.match(site, /run: npm run docs:site:build/)
+  assert.doesNotMatch(site, /run: npm run docs:check/)
 })
 
 test("the live-fake job owns the deterministic packed quickstart E2E", () => {
@@ -337,6 +343,12 @@ test("the required main checks are exactly the workflow job names", () => {
   for (const host of supported) expected.add(`OpenCode ${host}`)
 
   assert.deepEqual([...REQUIRED_STATUS_CHECKS].sort(), [...expected].sort())
+  assert.equal(REQUIRED_STATUS_CHECKS.includes("docs-rationale"), false)
+  assert.match(
+    read("docs/contributing/README.md"),
+    /not yet a required status check/i,
+    "the docs must not claim the rationale workflow is externally required",
+  )
 
   const verifyNames = [...workflowJobs(read(verifyWorkflowPath)).values()].map(
     (block) => /^ {4}name:\s*(.+)$/m.exec(block)?.[1],

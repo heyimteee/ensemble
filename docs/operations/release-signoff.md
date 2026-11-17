@@ -19,6 +19,8 @@ Date: 2026-11-17
 The table below records the released sign-off. The checklist in sections 1–9
 is retained as the reusable final gate for a future release.
 
+<a name="release-sign-off--010-rc2-released-2026-11-17"></a>
+
 ## Release sign-off — 0.1.0-rc.2 (released 2026-11-17)
 
 This is the released sign-off for the first public prerelease. The pre-tag

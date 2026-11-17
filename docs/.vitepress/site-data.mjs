@@ -208,7 +208,7 @@ export const sidebar = [
     items: [
       { text: "Operations", link: "/operations/" },
       { text: "Backup and restore", link: "/operations/backup-restore" },
-      { text: "Upgrade from the pre-release", link: "/operations/upgrade" },
+      { text: "Upgrade to stable 0.1.0", link: "/operations/upgrade" },
       { text: "Package rollback", link: "/operations/rollback" },
       { text: "Scale, soak, and diagnostics", link: "/operations/scale-and-monitoring" },
       { text: "Release operations", link: "/operations/release" },
