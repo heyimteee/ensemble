@@ -4,7 +4,7 @@ Read before changing the TUI or host integration, or diagnosing location diverge
 
 ## Evidence and versions
 
-- **Declared API/source:** the lockfile installs `@opencode/plugin` **2.2.1** and OpenTUI **0.7.0** for checking. Inspect their declarations and shipped implementation using the paths below.
+- **Declared API/source:** the lockfile installs `@opencode/plugin` **2.3.0**, OpenTUI **0.8.4**, and `solid-js` **1.9.19** for checking. Inspect their declarations and shipped implementation using the paths below.
 - **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI pins Node **26.12.1** and OpenCode **2.2.7** for the deterministic PR live jobs; the [compatibility workflow](../../.github/workflows/compatibility.yml) runs both supported hosts, 2.2.6 and 2.2.7, and the [host support range](../compatibility/opencode-host-range.md) records the peer range and runtime warning. These are not the same as the pinned type-package version. The [v7 verification](../verification/2026-11-07-v7.md), the [dispatch-budget verification](../verification/2026-11-08-dispatch-budgets.md), the [workspace-v2 verification](../verification/2026-11-09-workspace-v2.md), and the [native host contract probe](../verification/2026-11-10-native-host-contract.md) ran Node **26.12.1** with OpenCode **2.2.6** on Linux/tmux. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
 - **Repository behavior:** links below describe the current implementation. A passing typecheck establishes agreement with installed types, not compatibility with every installed host. Record `node --version` and `opencode --version` with live results; recheck assumptions when upgrading.
 
@@ -236,7 +236,7 @@ Start with these installed files (not another developer's temporary probes):
 | Style ownership/lifetime | `node_modules/@opentui/core/syntax-style.d.ts` |
 | Solid intrinsic props/renderer | `node_modules/@opentui/solid/` |
 
-Follow each package's `package.json` exports into shipped JS and source maps when declarations are insufficient. Package layouts can change; confirm paths locally. To inspect the CLI installation, use `command -v opencode` and `npm root -g`, then inspect the resolved installation's package metadata. A wrapper can select a different installation; a compiled CLI binary is not readable source. Neither a strings dump nor 2.2.1 declarations prove 2.2.3 internals. Use supported APIs and isolated live checks to resolve gaps rather than depending on private host implementation.
+Follow each package's `package.json` exports into shipped JS and source maps when declarations are insufficient. Package layouts can change; confirm paths locally. To inspect the CLI installation, use `command -v opencode` and `npm root -g`, then inspect the resolved installation's package metadata. A wrapper can select a different installation; a compiled CLI binary is not readable source. Neither a strings dump nor type-package declarations prove CLI internals. Use supported APIs and isolated live checks to resolve gaps rather than depending on private host implementation.
 
 ## TUI module graph and full client restart
 

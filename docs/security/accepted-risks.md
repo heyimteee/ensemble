@@ -1,8 +1,8 @@
 # Accepted security risks
 
 - **Status:** Active for the 0.1 release candidate
-- **Date:** 2026-11-16
-- **Ticket:** #271 (parent spec #268)
+- **Date:** 2026-11-17
+- **Ticket:** #271 (parent spec #268); re-reviewed for #296
 - **Owner:** maintainer
 - **Review cadence:** every dependency or host-compatibility change, and at least
   quarterly while any record below is active
@@ -13,43 +13,46 @@ be reopened, not silently renewed.
 
 ## Audit baseline
 
-Run on 2026-11-16 with Node 26.12.1 against `package-lock.json`:
+Run on 2026-11-17 with Node 26.12.1 against `package-lock.json` after the
+ticket #296 TUI runtime upgrade:
 
 ```text
 npm audit --omit=dev  ->  0 vulnerabilities
-npm audit             ->  28 vulnerabilities (25 moderate, 3 critical)
-                          all in devDependencies or the peer-dependency tree;
-                          no bundled production dependency
+npm audit             ->  24 vulnerabilities (24 moderate, 0 critical)
+                          all in devDependencies or the optional peer-dependency
+                          tree; the installed runtime tree is clean
 ```
 
-The published package ships source only and declares runtime peers
-(`@opencode/plugin`, `@opentui/core`, `@opentui/solid`, `solid-js`) that the
-OpenCode host provides. The audit result therefore describes the local
-development/test tree and the host integration, not code bundled into the npm
-artifact. `npm audit --omit=dev` is the release gate; `npm audit` is reviewed on
-every dependency change.
+The published package ships built JavaScript only and declares runtime
+dependencies (`@opentui/core`, `@opentui/solid`, `solid-js`) plus the optional
+`@opencode/plugin` peer that the OpenCode host provides. The audit result
+therefore describes the local development/test tree and the host integration,
+not code bundled into the npm artifact. `npm audit --omit=dev` is the release
+gate; `npm audit` is reviewed on every dependency change.
 
 ## AR-271-01: Seroval/solid-js advisories in the TUI peer tree
 
 - **Severity:** Critical (upstream advisory severity)
-- **Status:** Accepted
+- **Status:** Resolved by #296 (was accepted)
 - **Affected:** `seroval@1.5.6`, `solid-js@1.9.12`, `@opentui/solid@0.7.0`
 - **Advisories:** GHSA-p6vx-979v-rg4c, GHSA-jp82-f5mq-hwhp,
   GHSA-9wx9-5pv9-3349, GHSA-97r2-qh9m-474h, GHSA-wp97-x4hv-qvhp,
   GHSA-7rv5-mrxv-xcr9 (Seroval deserialization and RegExp issues)
-- **Why it is accepted:** `@opentui/solid@0.7.0` pins its peer to exactly
+- **Why it was accepted:** `@opentui/solid@0.7.0` pins its peer to exactly
   `solid-js@1.9.12`; the advisory is fixed in `solid-js` 1.9.16 or newer, which
-  that peer range rejects. Upgrading the TUI runtime is a product change with
+  that peer range rejects. Upgrading the TUI runtime was a product change with
   its own layout and motion verification, not a narrow security fix, and the
   installed plugin receives the host's TUI runtime. Ensemble never deserializes
   untrusted Seroval payloads itself: its use of `solid-js` is ordinary reactive
   UI rendering in the local TUI process.
-- **Compensating controls:** no network-supplied serialized data reaches the
-  TUI; the plugin ships no bundled dependency; the host and OpenTUI versions are
-  recorded in the compatibility matrix; Dependabot keeps the update visible.
-- **Fix path:** upgrade `@opentui/solid` and `solid-js` together when the
-  OpenCode/OpenTUI host moves to a compatible pair, then re-run the TUI,
-  accessibility, and size E2E suites.
+- **Resolution:** #296 moves the TUI stack to `@opentui/solid@0.8.4` and
+  `solid-js@1.9.19`. `npm audit` now reports no critical advisory. The TUI
+  compile, fake E2E, and size suites are the upgrade evidence; native macOS
+  render verification remains a separate release step.
+- **Compensating controls (historical):** no network-supplied serialized data
+  reached the TUI; the plugin ships no bundled dependency; the host and OpenTUI
+  versions are recorded in the compatibility matrix; Dependabot kept the update
+  visible.
 - **Review by:** 2027-01-15, or when the host compatibility matrix changes.
 
 ## AR-271-02: Approval resolution trusts the local TUI client
@@ -104,7 +107,7 @@ every dependency change.
 
 - **Severity:** Moderate (upstream advisory severity)
 - **Status:** Accepted
-- **Affected:** 25 moderate advisories in the dev tree, including
+- **Affected:** 24 moderate advisories in the dev tree, including
   `@npmcli/*`, `cacache`, `glob`, `minimatch`, `pacote`, `sigstore`,
   `@opencode/plugin`, and `@opencode/util`
 - **Advisories:** GHSA-g3hv-75wg-m249 (minimatch globparts amplification),
@@ -116,9 +119,10 @@ every dependency change.
   The fix for most of the chain is an upstream `@opencode/plugin`/npm release,
   which is outside this repository's control. `gaxios` and `rimraf` have
   audit-fixable paths but are still dev-only; Dependabot will propose them.
-- **Compensating controls:** the release gate uses `npm audit --omit=dev`; the
-  package has no runtime dependencies; CI installs with `npm ci` from the
-  lockfile; Dependabot opens grouped weekly updates.
+- **Compensating controls:** the release gate uses `npm audit --omit=dev`, which
+  covers the installed `@opentui/core`, `@opentui/solid`, and `solid-js` runtime
+  tree; CI installs with `npm ci` from the lockfile; Dependabot opens grouped
+  weekly updates.
 - **Review by:** 2027-01-15 (or sooner when Dependabot reports a new advisory).
 
 ## AR-271-05: Pattern-based log redaction is not exhaustive

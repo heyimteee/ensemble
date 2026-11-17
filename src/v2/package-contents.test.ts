@@ -266,9 +266,9 @@ test("the package identity is the scoped MIT OpenCode plugin", () => {
   assert.equal(packageJson.peerDependencies?.["@opencode/plugin"], "2.2.6 || 2.2.7 || 2.3.0")
   assert.deepEqual(Object.keys(packageJson.peerDependencies ?? {}), ["@opencode/plugin"])
   assert.deepEqual(packageJson.dependencies, {
-    "@opentui/core": "0.7.0",
-    "@opentui/solid": "0.7.0",
-    "solid-js": "1.9.12",
+    "@opentui/core": "0.8.4",
+    "@opentui/solid": "0.8.4",
+    "solid-js": "1.9.19",
   })
 })
 
