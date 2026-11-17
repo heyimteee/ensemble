@@ -38,7 +38,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -74,7 +74,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -116,7 +116,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
