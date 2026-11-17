@@ -32,7 +32,7 @@ style guide, and this map reachable from the [docs home](README.md).
 | v2 product specification (#17) | External issue link; see [Contributing](contributing/README.md) for workflow |
 | v2 implementation tickets (#18–#29) | External issue links; see [Contributing](contributing/README.md) for workflow |
 | Historical v1 specification (#1) | External issue link; historical only |
-| OpenCode host support range (`docs/compatibility/opencode-host-range.md`) | [Reference: supported hosts](reference/README.md#current-reference-sources); evidence in [the evidence index](contributing/evidence.md#compatibility-evidence) |
+| OpenCode host support range (`docs/compatibility/opencode-host-range.md`) | [Reference: supported hosts](reference/supported.md); evidence in [the evidence index](contributing/evidence.md#compatibility-evidence) |
 | OpenCode 2.2.1 compatibility report (`docs/compatibility/opencode-2.2.1.md`) | [Reference: historical compatibility](reference/README.md#historical-compatibility); evidence in [the evidence index](contributing/evidence.md#compatibility-evidence) |
 
 ## Working-agreement entries

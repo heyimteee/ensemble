@@ -81,11 +81,10 @@ pass without the pinned host and tools is not equivalent to CI evidence.
 These are accepted boundaries, not open troubleshooting threads. Report a new
 symptom through the [support policy](README.md) if it is not listed.
 
-- **The published prerelease owns npm `latest`.** `@heyimteee/ensemble` is
-  published as `0.1.0-rc.2` under both `latest` and `next` because it is the
-  only version; npm requires `latest` and rejects deleting it (E400). Pin the
-  exact version. See the
-  [release notes](../operations/release-notes-0.1.0-rc.2.md).
+- **Stable `0.1.0` owns npm `latest`.** `@heyimteee/ensemble` publishes stable
+  `0.1.0` on `latest` and `0.1.0-rc.3` on `next`. Pin the exact version in an
+  install instruction. See the
+  [0.1.0 release notes](../operations/release-notes-0.1.0.md).
 - **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
   passed with a pane-bounded Shift+drag and explicit copy. Ghostty
   `copy-on-select` is off, so a drag alone does not copy; this is a host
@@ -107,8 +106,9 @@ symptom through the [support policy](README.md) if it is not listed.
   upload logs or a support bundle and has no telemetry. The doctor ships in the
   repository; a package-only install uses the in-app `:logs` viewer and host
   logs.
-- **The 4-hour soak is a nightly/opt-in gate.** The recorded evidence is a smoke
-  run. The multi-hour gate has not been claimed as passed.
+- **The 4-hour soak is a nightly/opt-in gate.** The recorded evidence is a
+  four-hour enforced PASS on OpenCode 2.2.7 and 2.3.0, not part of the PR gate.
+  See the [soak record](../verification/2026-11-17-soak.md).
 - **Conversation history is host-owned.** Ensemble does not hand-edit or
   reconstruct OpenCode storage. Back up and restore it through the host; see
   the [incident runbook](incident-runbook.md#data-recovery).

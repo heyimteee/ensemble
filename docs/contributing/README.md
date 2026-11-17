@@ -56,5 +56,6 @@ deeper** link at the end of a concept page.
   redaction rules.
 - Do not rewrite an ADR or verification record to match a new claim; add a new
   record or supersede the decision.
-- Do not hand-maintain generated reference lists. The reference section documents
-  its owning sources until generation lands.
+- Do not hand-maintain generated reference lists. Run `npm run docs:reference`
+  after changing a catalog; `npm run docs:check` fails when a generated page is
+  stale, missing, or unreachable from the reference index.

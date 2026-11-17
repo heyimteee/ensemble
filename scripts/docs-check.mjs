@@ -24,6 +24,7 @@ import {
   SUPPORTED_OPENCODE_VERSIONS,
 } from "../src/v2/host-compatibility.ts"
 import { MINIMUM_NODE_VERSION } from "../src/v2/node-version.ts"
+import { checkReferenceDocs } from "./reference-check.mjs"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -403,6 +404,9 @@ function checkDocs(root = REPO_ROOT) {
   checkDocsNavigation(root, failures)
   checkVerificationIndex(root, failures)
   checkSupport(root, failures)
+  for (const failure of checkReferenceDocs(root)) {
+    failures.push(`reference:check: ${failure}`)
+  }
 
   return { failures, version, hosts, liveNode }
 }
@@ -412,9 +416,10 @@ if (help) {
   console.log(`Usage: node --experimental-strip-types scripts/docs-check.mjs [--root DIR]
 
 Asserts that the current docs match the canonical contract, host, and Node
-versions, that the user navigation exposes every docs section, and that every
+versions, that the user navigation exposes every docs section, that every
 verification record from ${CURRENT_RECORD_FLOOR} onward is linked from
-${EVIDENCE_INDEX}. Exits 1 on any stale or missing claim.`)
+${EVIDENCE_INDEX}, and that the generated reference is complete and current.
+Exits 1 on any stale or missing claim.`)
 } else {
   try {
     const args = parseArgs(process.argv.slice(2))
