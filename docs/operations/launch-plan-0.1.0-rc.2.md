@@ -8,8 +8,9 @@ agent may tag, publish, or announce.
 
 - Package: `@heyimteee/ensemble@0.1.0-rc.2`, MIT, one OpenCode plugin with the
   server, TUI, and RPC parts.
-- Supported hosts for this launch: OpenCode `2.2.6` and `2.2.7` on Linux/tmux;
-  macOS/Herdr is verified for the installed path except manual check 1.7.
+- Supported hosts for this launch: OpenCode `2.2.6`, `2.2.7`, and `2.3.0` on
+  Linux/tmux. macOS/Herdr is verified on `2.2.7` only, except manual check 1.7;
+  macOS 2.3.0 is not claimed.
 - Not in scope: Windows, WSL, OpenCode releases outside the supported range,
   and the final `0.1.0` version.
 - Public npm dist-tag: `next`. A prerelease must not become `latest`.
@@ -20,8 +21,8 @@ Primary:
 
 - OpenCode users on Linux with tmux who want persistent agent teams, routing,
   and durable Work rather than one-off chats.
-- Developers already running OpenCode `2.2.7` who can install and test a
-  scoped npm plugin with a pinned version.
+- Developers already running OpenCode `2.2.7` or `2.3.0` who can install and
+  test a scoped npm plugin with a pinned version.
 
 Secondary:
 
@@ -66,8 +67,9 @@ files, or unredacted logs.
 
 1. **Approve the candidate.** The release manager reviews
    [the sign-off](release-signoff.md), records the date and name, and
-   explicitly accepts or clears each pending item: macOS 1.7, the supported
-   OpenCode 2.2.7 soak rerun, and the package-downgrade gap.
+   explicitly accepts or clears each pending item: macOS 1.7, the pending
+   OpenCode 2.3.0 required CI context, and the package-downgrade gap. Both
+   supported Linux hosts passed the 4-hour soak.
 2. **Freeze the release commit.** Merge the approved release commit; every
    required check in [the release guide](release.md) must be green. No runtime
    change after the last clean-install evidence without a re-run.
@@ -101,8 +103,8 @@ files, or unredacted logs.
 
 Stop the announcement and begin rollback when any of these is confirmed:
 
-- the package cannot install on a supported OpenCode `2.2.7` or `2.2.6` host
-  with Node `>=22.23.4`;
+- the package cannot install on a supported OpenCode `2.2.6`, `2.2.7`, or
+  `2.3.0` host with Node `>=22.23.4`;
 - the installed TUI route or `/ensemble` command fails to load, or the six
   native server tools are absent;
 - a crash loop, startup failure, or workspace corruption is reproducible on a
@@ -140,6 +142,7 @@ There is no telemetry, so success is judged from public signals:
 - A final `0.1.0` launch. That is a separate decision after this candidate has
   run.
 - Windows support, paid support, hosted service, or a marketing campaign.
-- Claiming a supported-version 4-hour soak. The 4-hour gate passed on OpenCode
-  2.3.0; the 2.2.7 rerun is pending and not claimed. The macOS mouse-drag check
-  and Herdr prefix ownership remain pending or inconclusive until recorded.
+- Claiming a macOS or non-Linux 4-hour soak. Both supported Linux hosts passed
+  the 4-hour gate; macOS 2.3.0 and a green OpenCode 2.3.0 required CI context
+  are not claimed. The macOS mouse-drag check and Herdr prefix ownership
+  remain pending or inconclusive until recorded.

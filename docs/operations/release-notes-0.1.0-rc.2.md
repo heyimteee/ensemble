@@ -17,7 +17,8 @@ candidate.
 | Package | `@heyimteee/ensemble` |
 | Version | `0.1.0-rc.2` |
 | License | MIT |
-| Supported OpenCode | `2.2.6` and `2.2.7` |
+| Supported OpenCode | `2.2.6`, `2.2.7`, and `2.3.0` (Linux/tmux) |
+| OpenCode peer range | `2.2.6 || 2.2.7 || 2.3.0` |
 | Node floor | `22.23.4`; live suites use `26.12.1` |
 | npm dist-tag when published | `next` (a prerelease never becomes `latest`) |
 | Public release tag | Not cut; pending the remaining manual check and publish approval |
@@ -45,7 +46,10 @@ from the older `rc-0.1.0-rc.2` evidence tag.
 - A tag-driven release workflow with a token-free dry run, npm provenance, a
   CycloneDX SBOM, and changelog-based GitHub release notes.
 - macOS/Herdr verification of the installed package through SSH, including the
-  deterministic fake E2E.
+  deterministic fake E2E. macOS/Herdr is verified on OpenCode 2.2.7 only.
+- OpenCode 2.3.0 support: Linux host probe 14/14, size matrix, deterministic
+  fake E2E, and loopback install. The compatibility matrix and required context
+  include 2.3.0. (#286)
 - Fixes in this candidate: interrupted init restores `AGENTS.md` (#281),
   `NO_COLOR` suppresses Work and transcript decoration (#282, #284), and the
   Work feed rebuilds after a service restart (#283).
@@ -146,9 +150,15 @@ logs. Maintainer response targets are best effort, not an SLA.
   a loopback registry; do not recommend Git installs for this host.
 - **No telemetry.** Ensemble does not upload logs or usage data. Diagnostics
   are local, and the support bundle is opt-in and redacted.
-- **The 4-hour soak passed on an unsupported host.** The enforced gate passed
-  on OpenCode 2.3.0; the supported-version 2.2.7 rerun is still in progress and
-  is not claimed. Do not treat the 2.3.0 result as a 2.2.7 support claim.
+- **The 4-hour soak passed on both supported Linux hosts.** The enforced gate
+  passed on OpenCode 2.2.7 and 2.3.0 at `b194b95`; see the
+  [soak record](../verification/2026-11-17-soak.md).
+- **macOS/Herdr is verified on OpenCode 2.2.7 only.** The 2.3.0 support claim
+  is Linux-verified; macOS 2.3.0 is not claimed.
+- **The OpenCode 2.3.0 required CI context is pending.** Verify, Docs, and Node
+  Matrix are green at `a0c39c0`, but the Compatibility rerun is in progress
+  after an initial `typed text did not reach the TUI: s` failure on all three
+  host versions. Do not claim the 2.3.0 context green until confirmed.
 - **macOS size-matrix load probe is Linux-only.** Exact sizes pass with the
   load probe skipped. Braille glyphs depend on terminal font fallback on the
   tested Mac.
@@ -157,22 +167,24 @@ logs. Maintainer response targets are best effort, not an SLA.
 
 ## Proven and pending
 
-The final-tip runtime checks at `b194b95` supersede the earlier install
-evidence for the artifact. The package runtime is unchanged at the
-required-checks tip `4ccc410`; the later diff is CI workflows, the CI contract
-checker, and documentation. The clean install is still a loopback-registry
+The final-tip runtime checks at `b194b95` established the 2.2.x evidence. The
+latest tip `a0c39c0` adds OpenCode 2.3.0 support (#286) and reruns the
+final-tip install and fake E2E. The clean install is still a loopback-registry
 check, not a public npm install.
 
 | Item | Status | Evidence |
 |---|---|---|
 | Build, pack, and runtime-only contents | **PASS** | [#269](../verification/2026-11-16-ticket-269.md), [#279](../verification/2026-11-16-ticket-279.md) |
-| Final-tip clean install at `b194b95` (Linux, OpenCode 2.2.7) | **PASS** | 124 runtime files, 507,824 bytes; six native tools, TUI route, `/ensemble`; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95) |
-| Final-tip deterministic fake E2E at `b194b95` (OpenCode 2.2.7) | **PASS** | `fake` 407 s, `fake-empty` 9 s; 2 passed, 0 retries; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence-b194b95) |
-| Required CI at `4ccc410` (includes #285) | **PASS (one rerun)** | Verify (`verify`, `live-fake`, `live-native`, `live-multilocation`, `latency-smoke`), Compatibility (2.2.6 and 2.2.7), Docs, Node Matrix. First attempts hit `filtering spawned fd per keystroke (13 -> 14)` and `typed text did not reach the TUI: s`; reruns passed with no code change. Not a clean first pass. [Parent record](../verification/2026-11-17-ticket-268.md#required-ci-at-4ccc410) |
+| Final-tip install at `a0c39c0` (Linux, OpenCode 2.2.7) | **PASS** | 507,907 bytes; six native tools, TUI route, `/ensemble`; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence) |
+| Earlier install at `b194b95` (Linux, OpenCode 2.2.7) | **PASS** | 124 runtime files, 507,824 bytes; six native tools, TUI route, `/ensemble`; [parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence) |
+| Deterministic fake E2E at `a0c39c0` (2.2.7 and 2.3.0) | **PASS** | `fake` 416 s on each host; 2.3.0 host probe 14/14, size matrix PASS, loopback install PASS; [parent #268 record](../verification/2026-11-17-ticket-268.md#opencode-230-support-286) |
+| OpenCode 2.3.0 support (#286) | **PASS (Linux); required CI context PENDING** | Supported range `2.2.6 || 2.2.7 || 2.3.0`; compatibility matrix and ruleset context added. macOS/Herdr remains 2.2.7 only. |
+| Required CI at `a0c39c0` | **PARTIAL: Verify/Docs/Node PASS; Compatibility PENDING** | Verify, Docs, and Node Matrix green. Compatibility rerun in progress after initial `typed text did not reach the TUI: s` on all three host versions; the `OpenCode 2.3.0` context is not yet claimed green. [Parent record](../verification/2026-11-17-ticket-268.md#required-ci-at-a0c39c0) |
 | Six native tools, installed TUI route, `/ensemble` | **PASS** | [#279](../verification/2026-11-16-ticket-279.md), [#277](../verification/2026-11-16-ticket-277.md) |
 | macOS/Herdr install, TUI, fake E2E, checklist except 1.7 | **PASS except 1.7** | [#277](../verification/2026-11-16-ticket-277.md) |
+| macOS/Herdr on OpenCode 2.3.0 | **PENDING (not claimed)** | Only 2.2.7 is verified on macOS/Herdr. |
 | macOS mouse drag (1.7) | **PENDING** | Not run; no selection/copy claim |
-| 4-hour enforced soak at `b194b95` | **PASS on OpenCode 2.3.0; 2.2.7 rerun PENDING** | 240 samples, 14,439 s, 5,240 messages, 0 failures, 94.89 MiB/h and 19.14 MiB/1k messages; [soak record](../verification/2026-11-17-soak.md) |
+| 4-hour enforced soak at `b194b95` | **PASS on OpenCode 2.2.7 and 2.3.0** | 2.2.7: 240 samples, 14,439 s, 5,234 messages, 0 failures, 92.59 MiB/h and 18.71 MiB/1k. 2.3.0: 240 samples, 5,240 messages, 0 failures, 94.89 MiB/h and 19.14 MiB/1k. [soak record](../verification/2026-11-17-soak.md) |
 | Public npm publish, tag, GitHub release, announcement | **PENDING** | Human-gated; see [launch plan](launch-plan-0.1.0-rc.2.md) |
 
 The full release decision, sign-offs, and remaining gates are in

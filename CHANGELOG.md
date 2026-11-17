@@ -51,6 +51,11 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
   explicit no-telemetry/local-diagnostics policy. (#276)
 - macOS/Herdr verification of the installed package through SSH: install, TUI
   route, fake E2E, and the manual checklist except mouse drag 1.7. (#277)
+- OpenCode 2.3.0 support: the supported range is now
+  `2.2.6 || 2.2.7 || 2.3.0`, the compatibility matrix and required context
+  include 2.3.0, and the Linux checks pass (host probe 14/14, size matrix,
+  fake E2E 416 s, loopback install). macOS/Herdr remains verified on 2.2.7
+  only. (#286)
 
 ### Changed
 
@@ -81,26 +86,33 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
 ### Verified
 
 - `npm run verify` and `npm run docs:check` on the release candidate.
-- Final-tip clean install at `b194b95` in an isolated OpenCode 2.2.7 / Node
-  26.12.1 host: `test:install:rc` PASS; 124 runtime files, 507,824 bytes;
-  `plugin list` reported `ensemble.v2 0.1.0-rc.2` from the package; six native
-  server tools and the installed TUI route/`/ensemble` loaded.
-- Final-tip deterministic fake E2E at `b194b95` on OpenCode 2.2.7:
-  `test:live:fake:all` PASS; `fake` 407 s, `fake-empty` 9 s; 2 passed, 0 failed,
-  0 skipped, 0 retries; local flake budget ok.
-- Required CI at `4ccc410` is green: Verify (`verify`, `live-fake`,
+- Final-tip install at `a0c39c0` in an isolated OpenCode 2.2.7 / Node 26.12.1
+  host: PASS; 507,907 bytes; six native server tools, installed TUI route, and
+  `/ensemble` loaded. The earlier `b194b95` install passed at 124 runtime
+  files and 507,824 bytes.
+- Deterministic fake E2E at `a0c39c0`: OpenCode 2.2.7 and 2.3.0 PASS with
+  `fake` 416 s each. The 2.3.0 host probe passed 14/14, the size matrix passed,
+  and the loopback install passed.
+- Required CI at `4ccc410` was green: Verify (`verify`, `live-fake`,
   `live-native`, `live-multilocation`, `latency-smoke`), Compatibility
   (OpenCode 2.2.6 and 2.2.7), Docs, and Node Matrix. Verify and Compatibility
   each needed one rerun of failed jobs with no code change; the first attempts
   hit CI timing flakes (`filtering spawned fd per keystroke (13 -> 14)` and
-  `typed text did not reach the TUI: s`). This is not a clean first pass.
-- The package runtime is unchanged between `b194b95` and `4ccc410`; the later
-  diff is CI workflows, the CI contract checker, and documentation.
-- A 4-hour enforced soak at `b194b95` passed with 240 samples over 14,439 s and
-  5,240 messages: 0 failures, queue/native settled, RSS growth 94.89 MiB/h
-  (gate 256) and 19.14 MiB/1k messages (gate 64), no findings. The first run
-  resolved OpenCode 2.3.0, which is outside the supported range; the
-  supported-version 2.2.7 rerun is still in progress and is not claimed.
+  `typed text did not reach the TUI: s`). This was not a clean first pass.
+- At `a0c39c0`, Verify, Docs, and Node Matrix are green. The Compatibility
+  rerun is in progress after an initial `typed text did not reach the TUI: s`
+  failure on all three host versions; the `OpenCode 2.3.0` required context is
+  not yet claimed green.
+- The `b194b95` install and 2.2.x fake evidence still applies to the 2.2.x
+  runtime; #286 adds the 2.3.0 host range and is verified separately at
+  `a0c39c0`.
+- An enforced 4-hour soak at `b194b95` passed on both supported hosts:
+  OpenCode 2.2.7 had 240 samples over 14,439 s and 5,234 messages, 0 failures,
+  baseline/tail/peak RSS 672.8/1,010.09/1,153.89 MiB, growth 92.59 MiB/h
+  (gate 256) and 18.71 MiB/1k messages (gate 64), queue/native settled, no
+  findings; OpenCode 2.3.0 had 240 samples, 5,240 messages, 0 failures,
+  688.91/1,034.59/1,229.56 MiB, 94.89 MiB/h and 19.14 MiB/1k, settled, no
+  findings.
 - The deterministic fake and native E2E matrices on OpenCode 2.2.6 and 2.2.7.
 - The Node 22.23.4, 24.22.1, and 26.12.1 unit/typecheck matrix.
 - The installed `0.1.0-rc.2` package on Linux (loopback registry) and macOS
@@ -122,9 +134,15 @@ identity was set on 2026-11-16 and re-verified on macOS on 2026-11-17 after the
   package or the loopback registry.
 - **No telemetry.** Ensemble does not upload logs or usage data; diagnostics
   are local and must be redacted before sharing.
-- **The 4-hour soak passed on an unsupported host.** The enforced gate passed
-  on OpenCode 2.3.0; the supported-version 2.2.7 rerun is still in progress and
-  is not claimed. Do not treat the 2.3.0 result as a 2.2.7 support claim.
+- **The 4-hour soak passed on both supported Linux hosts.** The enforced gate
+  passed on OpenCode 2.2.7 and 2.3.0 at `b194b95`; the 2.3.0 run predates the
+  formal host-range merge but the workload and 2.3.0 behavior are unchanged.
+- **macOS/Herdr is verified on OpenCode 2.2.7 only.** The 2.3.0 support claim
+  is Linux-verified; macOS 2.3.0 is not claimed.
+- **The OpenCode 2.3.0 required CI context is pending.** Verify, Docs, and Node
+  Matrix are green at `a0c39c0`, but the Compatibility rerun is in progress
+  after an initial `typed text did not reach the TUI: s` failure on all three
+  host versions. Do not claim the 2.3.0 context green until it is confirmed.
 - **The macOS size-matrix load probe is Linux-only.** The size matrix passes
   with the load probe skipped; Braille glyphs depend on terminal font fallback
   on the tested Mac.
