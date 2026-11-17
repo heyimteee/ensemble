@@ -81,9 +81,10 @@ pass without the pinned host and tools is not equivalent to CI evidence.
 These are accepted boundaries, not open troubleshooting threads. Report a new
 symptom through the [support policy](README.md) if it is not listed.
 
-- **Distribution is pending.** The package is `@heyimteee/ensemble` under the
-  MIT license. The built `0.1.0-rc.2` candidate passes the isolated
-  `opencode plugin add` checks but is not published to a registry yet. See the
+- **The published prerelease owns npm `latest`.** `@heyimteee/ensemble` is
+  published as `0.1.0-rc.2` under both `latest` and `next` because it is the
+  only version; npm requires `latest` and rejects deleting it (E400). Pin the
+  exact version. See the
   [release notes](../operations/release-notes-0.1.0-rc.2.md).
 - **Automatic copy-on-release is not claimed on macOS.** Checklist item 1.7
   passed with a pane-bounded Shift+drag and explicit copy. Ghostty

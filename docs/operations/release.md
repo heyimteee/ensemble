@@ -5,36 +5,30 @@ records the release workflow, the main-branch protection, the credential
 boundary, and the dry-run rehearsal. Use
 [the release sign-off checklist](release-signoff.md) before creating the tag.
 
-## Current candidate
+## Current release
 
-The release candidate is `@heyimteee/ensemble@0.1.0-rc.2`. No version bump or
-rebuild is planned for the remaining manual check. The public release is
-**not approved**; the final public version and tag are cut on the approved
-commit after the human-gated publish decision. If the artifact stays at
-`0.1.0-rc.2`, the matching release tag is `v0.1.0-rc.2` and the dist-tag is
-`next`; a final `0.1.0` is a separate version and tag.
+`@heyimteee/ensemble@0.1.0-rc.2` is published as a GitHub prerelease at tag
+`v0.1.0-rc.2` (release commit `ccd13eb`) and on npm. npm dist-tags are
+`latest: 0.1.0-rc.2` and `next: 0.1.0-rc.2`; npm requires `latest` and rejects
+deleting it (E400), so both point at the RC while it is the only version. Pin
+the exact version for deliberate installs.
 
-The release-candidate verification tag is `rc-0.1.0-rc.2` at `d74fc3d`. It
-predates the #281–#284 fixes, so it is an evidence base, not a publish source,
-and it must not be moved. The fixed 2.2.x runtime was installed and checked on
-macOS from the build at `70f3da7`. #285 changes the CI workflows and contract
-checker; #286 adds OpenCode 2.3.0 support and the compatibility context; #287
-hardens the live TUI readiness with no product runtime change. The final-tip
-install at `a0c39c0` passed on 2.2.7, and the 2.2.7 and 2.3.0 4-hour soaks both
-passed at `b194b95`; see the
-[parent #268 record](../verification/2026-11-17-ticket-268.md#final-tip-evidence)
-and the [soak record](../verification/2026-11-17-soak.md). Required CI at
-`a7f1eb3` is green on the first attempt with no job rerun: Verify,
-Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix. The
-full macOS checklist including 1.7 is PASS (closed #277 at `7efd9a6`);
-automatic copy-on-release is not claimed. All verification gates are complete,
-and the candidate is ready for publish approval. If any runtime source changes,
-rerun the clean-install proof before tagging.
+The release-candidate verification tag `rc-0.1.0-rc.2` at `d74fc3d` predates
+the #281–#284 fixes; it is an evidence base, not a publish source, and must not
+be moved. #285 changes the CI workflows and contract checker; #286 adds
+OpenCode 2.3.0 support; #287 hardens live TUI readiness with no product runtime
+change. Required CI at `a7f1eb3` is green on the first attempt: Verify,
+Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix. Both
+4-hour soaks, the full macOS checklist including 1.7, and the public-registry
+install smoke on 2.2.7/2.3.0 pass. See the
+[parent #268 record](../verification/2026-11-17-ticket-268.md#public-registry-smoke)
+and the [soak record](../verification/2026-11-17-soak.md). If any runtime
+source changes, rerun the clean-install proof before a future tag.
 
 See the [release notes](release-notes-0.1.0-rc.2.md), [launch
-plan](launch-plan-0.1.0-rc.2.md), [candidate
-sign-off](release-signoff.md#candidate-sign-off--010-rc2-2026-11-17), and
-[parent #268 verification](../verification/2026-11-17-ticket-268.md).
+plan](launch-plan-0.1.0-rc.2.md), [release
+sign-off](release-signoff.md#release-sign-off--010-rc2-released-2026-11-17),
+and [parent #268 verification](../verification/2026-11-17-ticket-268.md).
 
 ## Required checks and main protection
 
@@ -117,8 +111,10 @@ absolute path.
   GitHub's OIDC provider.
 - npm refuses a prerelease without an explicit dist-tag. The preflight exports
   `next` for a version with a prerelease suffix and `latest` for a final
-  release, and both publish jobs pass `--tag "$DIST_TAG"`. A release candidate
-  therefore never becomes the default install.
+  release, and both publish jobs pass `--tag "$DIST_TAG"`. npm also requires a
+  `latest` tag and rejects deleting it (E400), so on a first/only publish
+  `latest` necessarily points at the prerelease even when `--tag next` is used.
+  Pin exact versions; a later stable release moves `latest`.
 - Rotate or revoke the token after a release if the credential may have been
   exposed. Never put a token in a workflow file, tag message, or issue.
 
@@ -151,9 +147,9 @@ missing export fails before any upload.
 
 ### Tagged release
 
-1. Approve the candidate and its notes, launch plan, and sign-off (#278). The
-   current candidate is `0.1.0-rc.2`; bump the version only if the approved
-   artifact or version decision changes.
+1. Approve the release and its notes, launch plan, and sign-off (#278). The
+   current published prerelease is `0.1.0-rc.2`; bump the version only if a
+   future artifact or version decision changes.
 2. Confirm `version` in `package.json` and `package-lock.json` agree; open the
    release pull request and let every required check pass.
 3. Merge to `main`, then tag the merge commit:

@@ -9,8 +9,8 @@ install path decided in #269/#270:
 opencode plugin add @heyimteee/ensemble@<version>
 ```
 
-The first release is `0.1.0`; `0.1.0-rc.2` is the built candidate used to prove
-the install path. Read the release notes (#278) for the exact version and any
+The first public release is the `0.1.0-rc.2` prerelease. A stable `0.1.0` is a
+future decision. Read the release notes (#278) for the exact version and any
 late changes. Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6,
 2.2.7, and 2.3.0.
 
@@ -38,7 +38,7 @@ late changes. Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6,
 ## Install the release
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0
+opencode plugin add @heyimteee/ensemble@0.1.0-rc.2
 opencode plugin list
 ```
 

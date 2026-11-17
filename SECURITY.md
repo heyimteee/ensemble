@@ -18,9 +18,9 @@ older versions are not backported.
 
 | Version | Supported |
 |---|---|
-| Latest published `0.1.x` release | Yes |
+| Latest published `0.1.x` release, including a published release candidate | Yes |
 | Earlier `0.1.x` releases | No — upgrade to the latest |
-| Pre-release, release candidate, or local build | No — reproduce on the latest release before reporting |
+| Unpublished pre-release, release candidate, or local build | No — reproduce on the latest published release before reporting |
 | Source checkout, fork, or modified package | Best effort only |
 
 The compatibility boundary is explicit: the supported OpenCode releases, the
