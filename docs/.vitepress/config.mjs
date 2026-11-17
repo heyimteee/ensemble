@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs"
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
 import { defineConfig } from "vitepress"
+import { withMermaid } from "vitepress-plugin-mermaid"
 import { canonicalFor, descriptionText, pageDescriptionFromFile } from "./seo.mjs"
 import {
   BASE,
@@ -137,7 +138,7 @@ function seoHead({ page, title, description, pageData }) {
   return head
 }
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   lang: "en-US",
   title: SITE_TITLE,
   titleTemplate: `:title · ${SITE_TITLE} docs`,
@@ -159,6 +160,15 @@ export default defineConfig({
   ],
   sitemap: {
     hostname: SITE_ORIGIN,
+  },
+  mermaid: {
+    // Mermaid's dark theme draws edge labels on a mid-grey chip. Keep the chip
+    // dark enough for the docs text colour to meet WCAG AA in both themes.
+    themeVariables: {
+      edgeLabelBackground: "#24242b",
+      primaryTextColor: "#e6e6e6",
+      lineColor: "#9aa0a6",
+    },
   },
   markdown: {
     config(md) {
@@ -214,4 +224,4 @@ export default defineConfig({
   transformHead(context) {
     return seoHead(context)
   },
-})
+}))

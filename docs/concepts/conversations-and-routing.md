@@ -63,6 +63,8 @@ does not change workspace membership.
 
 ```mermaid
 flowchart TD
+  accTitle: Group and direct message routing
+  accDescr: A message without an operator goes to the group leader, a dollar-name mention routes to each named agent, an at-path appends a workspace file, and a direct chat stays one-to-one.
   message["Your message"] --> prose{"Sanitized prose?"}
   prose -- "code, inline code, URL, or a bare name" --> reference["Reference only; no work"]
   prose -- "@path" --> file["Workspace file appended to the instruction"]
@@ -73,6 +75,8 @@ flowchart TD
   recipients --> work["A work item for each assignee"]
   leader --> work
 ```
+
+*Figure: routing decides recipients; it does not start a second scheduler.*
 
 Routing is not a second scheduler. It decides the recipients and hands the
 resulting turns to the same queue, budget, and Work machinery described in the

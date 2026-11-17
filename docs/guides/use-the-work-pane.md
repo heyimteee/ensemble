@@ -17,6 +17,23 @@ only the actions the focused card can run.
 - Read [Work lifecycle](../concepts/work-lifecycle.md) for the status words and
   [Dispatch budgets](../concepts/dispatch-budgets.md) for the budget label.
 
+
+<DocsFigure
+  src="/media/work-active.png"
+  alt="Work pane in ACTIVE view showing one dispatch group and an ADA card marked WORKING, with hops 0/8 and cmd 24 left."
+  caption="ACTIVE holds queued and running work. The card shows the assignee, status word, and dispatch budget; press f to switch to HISTORY."
+  width="742"
+  height="510"
+/>
+
+<DocsFigure
+  src="/media/work-history.png"
+  alt="Work pane in HISTORY view with three rolled-up finished groups; the newest group is expanded to a REPLIED ADA card."
+  caption="HISTORY rolls older groups up to one row and expands the newest finished group. press Enter to expand or collapse a group; press D to clear the view without deleting rows."
+  width="742"
+  height="510"
+/>
+
 ## Steps
 
 1. Press `Tab` until **Work** is selected, then press `Enter` to enter Work

@@ -10,6 +10,21 @@ OpenCode **2.2.6**, **2.2.7**, and **2.3.0** on Linux/tmux, with Node 22.23.4
 or newer. Prerelease history lives in the [changelog](../CHANGELOG.md), not in a
 separate docs tree.
 
+## See it in motion
+
+<TerminalHero
+  src="/media/hero-terminal.cast"
+  poster="/media/workspace-shell.png"
+  poster-alt="The Ensemble three-pane workspace in the synthetic Acme Notes fixture: agents in the rail, a working Ada card in Work, and a group message in chat."
+  caption="A scripted replay of the isolated synthetic fixture. The install command is illustrative; the workspace, message, Work card, and native session were captured from the local host."
+  title="Ensemble terminal replay: install, launch, group message, Work card, and native session"
+/>
+
+The replay covers the stable install command, `/ensemble`, a group message, the
+Work card, and the native session underneath. Read the
+[quickstart](getting-started/quickstart.md) for the same path as copyable steps,
+or the [workspace shell](concepts/workspace-shell.md) for the pane model.
+
 ## Start here
 
 | I want to… | Start with |

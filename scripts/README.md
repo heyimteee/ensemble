@@ -431,6 +431,30 @@ geometries; running the full scenario at a smaller height can fail because a
 finalized rich reply is not visible in the shorter pane, not because the Work
 layout is wrong.
 
+## Documentation media
+
+`npm run docs:media` regenerates the committed screenshots and terminal replay
+in `docs/public/media/` from an isolated synthetic **Acme Notes** workspace. It
+starts the deterministic fake provider and a temporary OpenCode 2.3.0 host
+through the live harness, captures the real TUI at 110×34 with
+`ENSEMBLE_REDUCED_MOTION=1`, then widens the TUI to 140×40 for the Work-pane
+stills. The temporary project path is redacted to `~/dev/acme-notes`; the
+renderer refuses `/home/`, `/tmp/opencode/`, the current user name, and fixture
+markers before writing a file.
+
+The command is manual and is **not** run by the docs build. It needs the built
+`dist/` tree (`npm run build`), Node, tmux, OpenCode, Python 3.11+, and Pillow.
+It also writes `MANIFEST.json` with the SHA-256 and natural size of every asset.
+The install command in the hero is shown for orientation, not executed; the
+workspace, messages, Work card, and native session are captured from the local
+host.
+
+`npm run docs:media:check` is the cheap CI check. It validates the manifest and
+file hashes, every `DocsFigure` alt text and caption, the terminal-hero poster
+description and text summary, Mermaid `accTitle`/`accDescr` coverage, and
+user-page heading order. It never starts a host. The docs check and docs-site
+check both include it.
+
 ## Backup and restore
 
 `npm run backup` is the operator client for ticket #273's durable-state

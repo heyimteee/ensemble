@@ -1,0 +1,66 @@
+{
+  "schema": "ensemble.docs-media",
+  "version": 1,
+  "synthetic": true,
+  "generator": "scripts/docs-media.sh",
+  "capture": {
+    "host": "OpenCode 2.3.0 with the local fake provider",
+    "terminal": "tmux 110x34, ENSEMBLE_REDUCED_MOTION=1",
+    "workspace": "synthetic Acme Notes fixture",
+    "source": "isolated HOME, XDG config/data/state, and project under a temporary directory",
+    "redaction": "the temporary project path is rendered as ~/dev/acme-notes",
+    "replay": "scripted asciinema v2 replay of captured frames; the install command is illustrative"
+  },
+  "assets": {
+    "workspace-shell.png": {
+      "kind": "screenshot",
+      "bytes": 73408,
+      "width": 1100,
+      "height": 680,
+      "sha256": "94c16a805c7725bad069c6d85f66ad1c65c17c0e5eed520d454642cc933f763a"
+    },
+    "work-active.png": {
+      "kind": "screenshot",
+      "bytes": 29597,
+      "width": 742,
+      "height": 510,
+      "sha256": "994609be85951ce9ce6a8f6fe0d3163c867c678dd67db6c343d84b3cb148a50c"
+    },
+    "work-history.png": {
+      "kind": "screenshot",
+      "bytes": 33959,
+      "width": 742,
+      "height": 510,
+      "sha256": "c35a6d28f1ecf6230298ebbb8cce35a91c5467bfc0f9d3f1598147713c9dbb8b"
+    },
+    "approvals.png": {
+      "kind": "screenshot",
+      "bytes": 21684,
+      "width": 742,
+      "height": 510,
+      "sha256": "9976a1862d503e944f327dcfec9f479154094488a7e708be9743245919104523"
+    },
+    "settings.png": {
+      "kind": "screenshot",
+      "bytes": 48310,
+      "width": 700,
+      "height": 930,
+      "sha256": "7bb0588f0ed2e3b012ac0db04c50f3edf069888599ae4aa1a1124d3b0d8ffb47"
+    },
+    "native-session.png": {
+      "kind": "screenshot",
+      "bytes": 60041,
+      "width": 1100,
+      "height": 680,
+      "sha256": "293bdde581269ac41a7d4a6e6369e8b012f3448e904662d04bce3f514b2ab3d4"
+    },
+    "hero-terminal.cast": {
+      "kind": "cast",
+      "bytes": 98743,
+      "width": 110,
+      "height": 34,
+      "events": 6,
+      "sha256": "3f57537f688ff6d3bce04a4a7f67ba22ef96c04328928029eb714da1e422cc71"
+    }
+  }
+}

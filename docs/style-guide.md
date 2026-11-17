@@ -171,6 +171,14 @@ Rules:
   wide terminal to show the point.
 - Optimize images before committing and keep the source asset next to the
   generated file when the build supports it.
+- Use `<DocsFigure>` for screenshots. It requires `src`, a useful `alt`, a
+  `caption`, and the natural `width`/`height`; the media check verifies all
+  four.
+- Every Mermaid fence declares `accTitle` and `accDescr`. The rendered SVG
+  carries them as its accessible title and description.
+- Regenerate captures with `npm run docs:media`, not during a docs build. Use
+  `npm run docs:media:check` for the cheap manifest, alt-text, caption, and
+  diagram check.
 
 ## Links, navigation, and redirects
 

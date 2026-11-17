@@ -73,6 +73,8 @@ ledger.
 
 ```mermaid
 flowchart TB
+  accTitle: Dispatch budget layers
+  accDescr: One command captures a command budget and a root group; delegations spend hops, leader continuations extend a group, task and depth budgets bound each call, and a terminal continuation starts a new command root.
   user["One user command"] -- "captures the settings into a root group" --> command["Command budget 24<br/>across every group"]
   command -- "root segment" --> root["Group budget 8<br/>root"]
   root -- "leader opens after exhaustion" --> cont1["Group budget 8<br/>continuation 1"]
@@ -82,6 +84,8 @@ flowchart TB
   check -- "longest ancestor chain" --> depth["Depth budget 8"]
   terminal["Terminal turn"] -- "ensemble_dispatch starts" --> next["New command root<br/>fresh 24 / 8 / 8"]
 ```
+
+*Figure: the four budget layers and the two ways a command continues.*
 
 ## Worked example
 

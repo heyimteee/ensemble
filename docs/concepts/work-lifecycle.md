@@ -63,42 +63,26 @@ live work. Terminal means replied, failed, or cancelled; stalled is not
 terminal.
 
 ```mermaid
-stateDiagram-v2
-  state "Pending" as Pending
-  state "Working" as Working
-  state "Waiting" as Waiting
-  state "Retrying" as Retrying
-  state "Needs you" as NeedsYou
-  state "Replied" as Replied
-  state "Failed" as Failed
-  state "Stalled" as Stalled
-  state "Cancelled" as Cancelled
-
-  [*] --> Pending: a command or delegation is queued
-  Pending --> Working: an agent claims the item
-  Working --> Waiting: the item waits for child work
-  Waiting --> Working: child results arrive
-  Working --> Retrying: a transient failure schedules a retry
-  Retrying --> Working: the retry claims the item
-  Working --> NeedsYou: an approval or interruption needs you
-  Waiting --> NeedsYou: an approval or interruption needs you
-  Retrying --> NeedsYou: an approval or interruption needs you
-  NeedsYou --> Working: you approve and work resumes
-  NeedsYou --> Failed: you discard interrupted work
-  Working --> Failed: a native execution error settles the turn
-  Retrying --> Stalled: retry attempts are exhausted
-  Stalled --> Working: you retry or restart
-  Working --> Replied: the turn settles with a result
-  Waiting --> Replied: all children reply and the turn settles
-  Retrying --> Replied: the retry succeeds
-  Pending --> Cancelled: you cancel
-  Working --> Cancelled: you cancel
-  NeedsYou --> Cancelled: you cancel
-  Stalled --> Cancelled: you cancel
-  Replied --> [*]
-  Failed --> [*]
-  Cancelled --> [*]
+flowchart TB
+  accTitle: Work item lifecycle
+  accDescr: ACTIVE holds queued, working, waiting, retrying, needs-you, and stalled work. Successful work settles as replied; a native error settles as failed; cancelling any active state settles as cancelled.
+  subgraph active [ACTIVE · non-terminal work]
+    direction LR
+    queued["QUEUED"] -- "an agent claims it" --> working["WORKING"]
+    working -- "waits for child work" --> waiting["WAITING"]
+    waiting -- "children settle" --> working
+    working -- "transient failure" --> retrying["RETRYING"]
+    retrying -- "retry succeeds" --> working
+    working -- "approval or interruption" --> needs["NEEDS YOU"]
+    needs -- "you approve" --> working
+    retrying -- "attempts exhausted" --> stalled["STALLED"]
+  end
+  active -- "the turn settles" --> replied["REPLIED"]
+  active -- "a native execution error settles the turn" --> failed["FAILED"]
+  active -- "you cancel" --> cancelled["CANCELLED"]
 ```
+
+*Figure: the main Work lifecycle paths. The status table above defines each state; stalled work stays in ACTIVE until you retry, restart, or cancel it, and a needs-you item can resume on approval or settle as failed when you discard it.*
 
 ## Example
 

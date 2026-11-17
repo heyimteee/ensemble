@@ -10,13 +10,14 @@ native OpenCode session runs underneath.
 opencode plugin add @heyimteee/ensemble@0.1.0
 ```
 
-<!-- docs visual: hero terminal recording of install, /ensemble, a first group reply, and the Work pane; ticket #309 owns the asset. -->
+<a href="docs/README.md#see-it-in-motion">
+  <img src="docs/public/media/workspace-shell.png" width="1100" alt="The Ensemble three-pane workspace at 110 columns: the rail lists Ada, Nova, and Rook in the synthetic acme-notes workspace; the chat shows a group message; the Work pane shows Ada's WORKING card and its hop budget." />
+</a>
 
-> **Visual placeholder.** The documentation site will open with a short terminal
-> recording of the three-pane workspace: agents and workspaces on the left, the
-> group chat in the middle, and Work on the right. Until the recording lands,
-> the [quickstart](docs/getting-started/quickstart.md) walks through the same
-> screen with copyable commands and expected output.
+*The three-pane workspace in the synthetic Acme Notes fixture. The
+[documentation home](docs/README.md#see-it-in-motion) plays the short terminal
+replay of install, `/ensemble`, a group reply, the Work card, and the native
+session. Captures use synthetic data only; the install command is illustrative.*
 
 [Get started](docs/getting-started/README.md) ·
 [What is Ensemble?](docs/getting-started/what-is-ensemble.md) ·
