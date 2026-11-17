@@ -54,6 +54,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 ## Verification
 
 - [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence
+- [OpenCode 2.3.0 compatibility](verification/2026-11-17-ticket-286.md): the host-range expansion, the 2.3.0 and 2.2.7 fake E2E runs, the passing host probe, the high-contrast focus-tone harness fix, the size matrix, and the loopback install proof
 - [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
 - [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
 - [Clean-install release candidate](verification/2026-11-16-ticket-270.md): the loopback-registry `opencode plugin add` proof, the installed server tools and package source, and the exact TUI source-package load failure deferred to #279

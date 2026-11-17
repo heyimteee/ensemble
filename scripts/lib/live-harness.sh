@@ -1395,7 +1395,7 @@ live_border_above_text_color() {
 
 live_color_is_white() {
   case "$1" in
-    38\;5\;15|38\;5\;231|38\;5\;255|38\;2\;255\;255\;255) return 0 ;;
+    38\;5\;15|38\;5\;231|38\;5\;255|38\;2\;255\;255\;255|38\;2\;238\;238\;238) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1403,7 +1403,12 @@ live_color_is_white() {
 live_color_is_grey() {
   case "$1" in
     38\;5\;8|38\;5\;140|38\;5\;232|38\;5\;236|38\;5\;238|38\;5\;240|38\;5\;242) return 0 ;;
-    38\;2\;*) return 0 ;;
+    38\;2\;*)
+      local sgr kind r g b
+      IFS=';' read -r sgr kind r g b <<<"$1"
+      [[ "$r" =~ ^[0-9]+$ && "$r" == "$g" && "$g" == "$b" && "$r" -lt 200 ]]
+      return $?
+      ;;
     *) return 1 ;;
   esac
 }

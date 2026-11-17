@@ -12,6 +12,10 @@ release scaffolding, not the launch announcement.
 
 ## [Unreleased]
 
+- OpenCode 2.3.0 is in the supported host range. The compatibility matrix,
+  peer range, and runtime preflight accept 2.2.6, 2.2.7, and 2.3.0; the
+  deterministic live harness accepts the host's `#eeeeee` high-contrast focus
+  text alongside exact white (ticket #286).
 - Final `0.1.0` release notes, launch plan, and the macOS/Herdr verification
   record land with ticket #278 and #277.
 

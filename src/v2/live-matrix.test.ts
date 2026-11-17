@@ -304,3 +304,36 @@ test("the group header assertion joins a wrapped title but ignores transcript ro
     rmSync(box.root, { recursive: true, force: true })
   }
 })
+
+function colorPredicate(box: Sandbox, name: string, color: string): boolean {
+  const result = spawnSync(bash, ["-c", `source "$1"; ${name} "$2"`, "--", harness, color], {
+    encoding: "utf8",
+    env: environment(box),
+  })
+  assert.ok(result.status === 0 || result.status === 1, result.stderr)
+  return result.status === 0
+}
+
+test("focus white accepts the host high-contrast text tone but not unfocused grey", () => {
+  // Ticket #286: OpenCode 2.3.0 themes draw focused headings and borders with
+  // the host's high-contrast text (#eeeeee), while unfocused chrome stays grey.
+  const box = sandbox()
+  try {
+    for (const color of ["38;2;255;255;255", "38;2;238;238;238", "38;5;15", "38;5;231", "38;5;255"]) {
+      assert.equal(colorPredicate(box, "live_color_is_white", color), true, `${color} is focus white`)
+    }
+    for (const color of ["default", "38;5;240", "38;2;128;128;128"]) {
+      assert.equal(colorPredicate(box, "live_color_is_white", color), false, `${color} is not focus white`)
+    }
+    for (const color of ["38;5;240", "38;2;128;128;128"]) {
+      assert.equal(colorPredicate(box, "live_color_is_grey", color), true, `${color} is unfocused grey`)
+    }
+    assert.equal(
+      colorPredicate(box, "live_color_is_grey", "38;2;238;238;238"),
+      false,
+      "the high-contrast focus tone is not unfocused grey",
+    )
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})

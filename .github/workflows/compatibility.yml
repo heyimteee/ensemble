@@ -20,7 +20,7 @@ jobs:
       matrix:
         # Ticket #257: every host in the declared peer range must run both the
         # native host contract probe and the deterministic fake smoke.
-        opencode: ["2.2.6", "2.2.7"]
+        opencode: ["2.2.6", "2.2.7", "2.3.0"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

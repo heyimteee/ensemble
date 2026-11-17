@@ -292,7 +292,7 @@ test("ticket257: service start warns on an unsupported host and stays quiet on a
   try {
     assert.equal(warnings.length, 1, "one preflight warning per service realm")
     assert.match(warnings[0], /OpenCode 2\.2\.5 is not supported/)
-    assert.match(warnings[0], /2\.2\.6 and 2\.2\.7/)
+    assert.match(warnings[0], /2\.2\.6, 2\.2\.7, and 2\.3\.0/)
     const entry = getGlobalLogger()?.recent({ event: "host.unsupported" }).at(-1)
     assert.ok(entry, "the warning is recorded for diagnostics")
     assert.equal(entry.level, "warn")

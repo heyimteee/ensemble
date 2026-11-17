@@ -263,7 +263,7 @@ test("the package identity is the scoped MIT OpenCode plugin", () => {
   )
   assert.equal(existsSync(join(repoRoot, "tsconfig.build.json")), true)
   assert.equal(packageJson.engines?.node, ">=22.23.4")
-  assert.equal(packageJson.peerDependencies?.["@opencode/plugin"], "2.2.6 || 2.2.7")
+  assert.equal(packageJson.peerDependencies?.["@opencode/plugin"], "2.2.6 || 2.2.7 || 2.3.0")
   assert.deepEqual(Object.keys(packageJson.peerDependencies ?? {}), ["@opencode/plugin"])
   assert.deepEqual(packageJson.dependencies, {
     "@opentui/core": "0.7.0",

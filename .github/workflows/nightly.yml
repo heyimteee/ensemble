@@ -27,7 +27,7 @@ env:
   # Keep aligned with SUPPORTED_OPENCODE_VERSIONS in
   # src/v2/host-compatibility.ts. The compatibility matrix covers 2.2.6 and
   # 2.2.7; the nightly reference host runs the latest tested host.
-  OPENCODE_VERSION: "2.2.7"
+  OPENCODE_VERSION: "2.3.0"
   FD_VERSION: "10.2.0"
 
 jobs:
