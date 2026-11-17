@@ -66,11 +66,15 @@ function escapePlaceholderHtml(md) {
   // target without changing the visible heading. Everything else is escaped
   // so placeholders such as `<name>` render as text.
   const namedAnchor = /^<a\s+(?:name|id)="[A-Za-z0-9_:.-]+"\s*>$/i
+  // VitePress emits this character reference as the invisible heading-anchor
+  // symbol. The theme draws `#` in CSS; escaping it would print the entity.
+  const vitepressAnchorSymbol = "&ZeroWidthSpace;"
   md.renderer.rules.html_inline = (tokens, index, options, env, self) => {
     const content = tokens[index].content
     if (
       /^<(?:br|wbr)\s*\/?>$/i.test(content) ||
       namedAnchor.test(content) ||
+      content === vitepressAnchorSymbol ||
       content === "</a>"
     ) {
       return previous
@@ -181,13 +185,16 @@ export default withMermaid(defineConfig({
     },
   },
   markdown: {
+    // Shiki's default light palette has code-comment and keyword colours below
+    // WCAG AA on the docs background. Use the higher-contrast GitHub theme.
+    theme: { light: "github-light-high-contrast", dark: "github-dark-high-contrast" },
     config(md) {
       escapePlaceholderHtml(md)
       rewriteLinks(md)
     },
   },
   themeConfig: {
-    logo: "/favicon.svg",
+    logo: { src: "/logo.svg", alt: "Ensemble" },
     siteTitle: SITE_TITLE,
     nav,
     sidebar,

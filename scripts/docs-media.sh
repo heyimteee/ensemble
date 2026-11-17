@@ -4,7 +4,7 @@
 #
 # It starts only the local fake provider and OpenCode host from the live test
 # harness, uses a temporary HOME/config/data tree, and captures the real TUI at
-# 110x34 with motion disabled. No real screen, browser tab, conversation, or
+# 140x40 with motion disabled. No real screen, browser tab, conversation, or
 # installed user configuration is read. The fixture and visible states are
 # deterministic; host-rendered elapsed times and stream-phase glyphs can differ
 # between runs. The manifest records the committed bytes.
@@ -113,7 +113,7 @@ mkdir -p "$LIVE_BASE/frames"
 # deliberately not executed: the docs caption says the command is illustrative.
 SHELL_SESSION="ensemble-docs-media-shell-$LIVE_RUN_ID"
 LIVE_SESSION_NAMES+=("$SHELL_SESSION")
-"$LIVE_TMUX_BIN" new-session -d -s "$SHELL_SESSION" -x 110 -y 34 -c "$LIVE_PROJECT" \
+"$LIVE_TMUX_BIN" new-session -d -s "$SHELL_SESSION" -x 140 -y 40 -c "$LIVE_PROJECT" \
   "$(live_command bash --noprofile --norc)"
 sleep 0.6
 "$LIVE_TMUX_BIN" send-keys -t "$SHELL_SESSION" "export PS1='~ $ '" Enter
@@ -124,8 +124,8 @@ sleep 0.5
 "$LIVE_TMUX_BIN" capture-pane -e -p -t "$SHELL_SESSION" >"$LIVE_BASE/frames/hero-install.ansi"
 "$LIVE_TMUX_BIN" kill-session -t "$SHELL_SESSION" 2>/dev/null || true
 
-ENSEMBLE_LIVE_TUI_WIDTH=110
-ENSEMBLE_LIVE_TUI_HEIGHT=34
+ENSEMBLE_LIVE_TUI_WIDTH=140
+ENSEMBLE_LIVE_TUI_HEIGHT=40
 live_start_tui
 live_wait_for_native_tui
 live_type "$LIVE_TUI_SESSION" "/ensemble"
@@ -189,18 +189,11 @@ live_require_text "$LIVE_TUI_SESSION" "WORKING" 20 "working Work card"
 live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 20 "ACTIVE view"
 cap work-active
 
-resize_tui() {
-  "$LIVE_TMUX_BIN" resize-window -t "$LIVE_TUI_SESSION" -x "$1" -y "$2" 2>/dev/null || true
-  sleep 1
-}
-resize_tui 140 40
-cap work-active-wide
-
 live_focus_work_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" f
 live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY" 10 "history view"
 sleep 1
-cap work-history-wide
+cap work-history
 live_key "$LIVE_TUI_SESSION" f
 
 # A pending memory-promotion approval gives the approvals screenshot real state.
@@ -212,7 +205,7 @@ live_invoke memory.promote "{\"id\":\"$memory\"}" >/dev/null
 sleep 1
 live_key "$LIVE_TUI_SESSION" v
 live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 10 "pending approvals inbox"
-cap approvals-wide
+cap approvals
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.5
 
@@ -221,7 +214,7 @@ live_focus_chat_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" s
 live_require_text "$LIVE_TUI_SESSION" "Ada │ settings" 10 "agent settings"
 sleep 0.5
-cap settings-wide
+cap settings
 
 # Render the committed assets and the cast from the captured frames.
 MEDIA_DIR="$REPO_ROOT/docs/public/media"
@@ -256,8 +249,8 @@ render_image() {
     image
     --input "$LIVE_BASE/frames/$source.ansi"
     --output "$MEDIA_DIR/$name"
-    --cols 110
-    --rows 34
+    --cols 140
+    --rows 40
     --font-size "$font"
     --replace "${replace_args[0]}"
     --replace "${replace_args[1]}"
@@ -273,23 +266,10 @@ render_image() {
 }
 
 render_image workspace-shell.png work-active 16
-render_image_wide() {
-  local name="$1" source="$2" font="$3" crop="$4"
-  python3 "$SCRIPT_DIR/docs-media-render.py" image \
-    --input "$LIVE_BASE/frames/$source.ansi" \
-    --output "$MEDIA_DIR/$name" \
-    --cols 140 --rows 40 --font-size "$font" \
-    --crop "$crop" \
-    --replace "${replace_args[0]}" \
-    --replace "${replace_args[1]}" \
-    --forbid "/home/" --forbid "/tmp/opencode/" \
-    --forbid "fake-rich-fixture" --forbid "RICH_CODE_MARKER" --forbid "fake-ask-person" \
-    "${privacy_forbid[@]}"
-}
-render_image_wide work-active.png work-active-wide 24 "86,5,139,22"
-render_image_wide work-history.png work-history-wide 24 "86,5,139,22"
-render_image_wide approvals.png approvals-wide 24 "86,5,139,22"
-render_image_wide settings.png settings-wide 24 "35,5,85,36"
+render_image work-active.png work-active 16
+render_image work-history.png work-history 16
+render_image approvals.png approvals 16
+render_image settings.png settings 16
 render_image native-session.png native 16
 
 cat >"$LIVE_BASE/frames/hero.json" <<EOF
@@ -305,7 +285,7 @@ EOF
 python3 "$SCRIPT_DIR/docs-media-render.py" cast \
   --frames "$LIVE_BASE/frames/hero.json" \
   --output "$MEDIA_DIR/hero-terminal.cast" \
-  --cols 110 --rows 34 \
+  --cols 140 --rows 40 \
   --title "Ensemble synthetic Acme Notes replay" \
   --replace "${replace_args[0]}" \
   --replace "${replace_args[1]}" \

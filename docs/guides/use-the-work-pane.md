@@ -22,16 +22,16 @@ only the actions the focused work item can run.
   src="/media/work-active.png"
   alt="Work pane in ACTIVE view showing one dispatch group and an ADA work item marked WORKING, with hops 0/8 and cmd 24 left."
   caption="ACTIVE holds queued and running work. The work item shows the assignee, status word, and dispatch budget; press f to switch to HISTORY."
-  width="742"
-  height="510"
+  width="1400"
+  height="800"
 />
 
 <DocsFigure
   src="/media/work-history.png"
   alt="Work pane in HISTORY view with three rolled-up finished groups; the newest group is expanded to a REPLIED ADA work item."
   caption="HISTORY rolls older groups up to one row and expands the newest finished group. Press Enter to expand or collapse a group; press D to clear the view without deleting rows."
-  width="742"
-  height="510"
+  width="1400"
+  height="800"
 />
 
 ## Steps

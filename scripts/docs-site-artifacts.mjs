@@ -247,6 +247,13 @@ function verifyBuild() {
     if (ANALYTICS_PATTERNS.some((pattern) => pattern.test(html))) {
       failures.push(`${label}: contains an external analytics reference`)
     }
+    // VitePress inserts `&ZeroWidthSpace;` as the hidden heading-anchor symbol
+    // and shows `#` from CSS. Escaping that entity inside a header anchor turns
+    // the invisible symbol into visible `&ZeroWidthSpace;` text on hover. Docs
+    // prose may mention the entity literally, so check the anchor, not the page.
+    if (/<a\b[^>]*class="header-anchor"[^>]*>[^<]*&amp;ZeroWidthSpace;/.test(html)) {
+      failures.push(`${label}: heading anchor symbol was escaped and will render as text`)
+    }
   }
 
   const sitemap = join(OUT_DIR, "sitemap.xml")

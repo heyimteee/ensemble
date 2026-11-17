@@ -31,10 +31,10 @@ question: where you are, who is talking, and what the team is doing.
 
 <DocsFigure
   src="/media/workspace-shell.png"
-  alt="Three-pane Ensemble workspace at 110 columns: the rail lists Ada, Nova, and Rook under acme-notes; the chat shows a group message; Work shows Ada's WORKING work item with the hop budget."
+  alt="Three-pane Ensemble workspace at 140 columns: the rail lists Ada, Nova, and Rook under acme-notes; the chat shows a group message; Work shows Ada's WORKING work item with the hop budget."
   caption="The three-pane shell in the synthetic Acme Notes fixture. Work is active while Ada writes the release note. Select the image to open the full-size capture."
-  width="1100"
-  height="680"
+  width="1400"
+  height="800"
 />
 
 ## Mental model

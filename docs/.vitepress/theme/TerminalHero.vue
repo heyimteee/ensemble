@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from "vue"
+import { onBeforeUnmount, ref } from "vue"
 import { withBase } from "vitepress"
 import "asciinema-player/dist/bundle/asciinema-player.css"
 
@@ -16,18 +16,12 @@ const posterVisible = ref(true)
 const started = ref(false)
 const failed = ref(false)
 let player
-let observer
-
-function reducedMotion() {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
-}
 
 async function start() {
   if (started.value || !host.value) return
   started.value = true
   try {
     const { create } = await import("asciinema-player")
-    posterVisible.value = false
     player = create({ url: withBase(props.src) }, host.value, {
       autoPlay: true,
       loop: true,
@@ -37,6 +31,7 @@ async function start() {
       terminalFontFamily: "'DejaVu Sans Mono', 'Noto Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
       idleTimeLimit: 2,
     })
+    posterVisible.value = false
   } catch {
     failed.value = true
     posterVisible.value = true
@@ -44,27 +39,7 @@ async function start() {
   }
 }
 
-onMounted(() => {
-  if (reducedMotion()) return
-  if ("IntersectionObserver" in window) {
-    observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          observer?.disconnect()
-          observer = undefined
-          void start()
-        }
-      },
-      { threshold: 0.3 },
-    )
-    observer.observe(host.value)
-  } else {
-    void start()
-  }
-})
-
 onBeforeUnmount(() => {
-  observer?.disconnect()
   player?.dispose?.()
 })
 </script>
