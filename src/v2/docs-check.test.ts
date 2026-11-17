@@ -68,7 +68,7 @@ test("docs-check accepts the current docs and canonical versions", () => {
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /docs:check: ok/)
     assert.match(result.stdout, /contract v7/)
-    assert.match(result.stdout, /OpenCode 2\.2\.6, 2\.2\.7/)
+    assert.match(result.stdout, /OpenCode 2\.2\.6, 2\.2\.7, 2\.3\.0/)
     assert.match(result.stdout, /Node >=22\.23\.4/)
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -134,7 +134,7 @@ test("docs-check derives the tested Node claim from the matrix workflow", () => 
 test("docs-check rejects an untested OpenCode host claim", () => {
   const root = fixtureRepo()
   try {
-    replace(root, "README.md", "OpenCode **2.2.6** and **2.2.7**", "OpenCode **2.2.5** and **2.2.7**")
+    replace(root, "README.md", "OpenCode **2.2.6**, **2.2.7**, and **2.3.0**", "OpenCode **2.2.5**, **2.2.7**, and **2.3.0**")
     const result = run(root)
     assert.equal(result.status, 1)
     assert.match(result.stderr, /README\.md/)

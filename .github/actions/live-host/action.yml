@@ -45,3 +45,8 @@ runs:
     - name: Install npm dependencies
       shell: bash
       run: npm ci
+    # Ticket #285: the package exports load dist/, so a fresh checkout needs
+    # the runtime build before any live suite starts a host.
+    - name: Build runtime
+      shell: bash
+      run: npm run build

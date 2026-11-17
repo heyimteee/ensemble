@@ -4,7 +4,7 @@
 
 Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is MIT licensed, named `@heyimteee/ensemble`, and not published to a public registry yet. Compatibility is verified on OpenCode **2.2.6** and **2.2.7** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
+> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is MIT licensed, named `@heyimteee/ensemble`, and not published to a public registry yet. Compatibility is verified on OpenCode **2.2.6**, **2.2.7**, and **2.3.0** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
 
 > **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md); the terminal-turn workflow is in [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md). Current behavior and evidence are recorded in the verification index.
 
@@ -64,7 +64,7 @@ Until the first release, add the repository to `opencode.json`:
 
 If the plugin was already loaded before updating the package exports, run `opencode reload` or restart the OpenCode service.
 
-Ensemble supports OpenCode **2.2.6** and **2.2.7** on Linux/tmux with Node 26.12.1. The `@opencode/plugin` peer range is `2.2.6 || 2.2.7`. An unsupported host still loads, but Ensemble writes a runtime warning because its behavior is untested. See the [OpenCode host support range](docs/compatibility/opencode-host-range.md) for the CLI-to-API mapping and evidence.
+Ensemble supports OpenCode **2.2.6**, **2.2.7**, and **2.3.0** on Linux/tmux with Node 26.12.1. The `@opencode/plugin` peer range is `2.2.6 || 2.2.7 || 2.3.0`. An unsupported host still loads, but Ensemble writes a runtime warning because its behavior is untested. See the [OpenCode host support range](docs/compatibility/opencode-host-range.md) for the CLI-to-API mapping and evidence.
 
 Upgrading from a pre-ledger workspace synthesizes dispatch groups on first
 access: used hops come from the existing non-completion delegations and
@@ -195,7 +195,7 @@ Every requested directory is queried on the **one selected service**, sequential
 ## Known limitations
 
 - **Distribution is pending.** The package is `@heyimteee/ensemble` under the MIT license. The built `0.1.0-rc.2` candidate passes the isolated `opencode plugin add` server and TUI check but is not published to a registry yet. See the [release notes](docs/operations/release-notes-0.1.0-rc.2.md) and the [built-package verification record](docs/verification/2026-11-16-ticket-279.md).
-- **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 are tested. Linux/tmux and the installed macOS/Herdr path are verified; macOS mouse drag (checklist 1.7) is not claimed, and Windows/WSL is out of scope. Other host releases load with a runtime warning but are untested. See the [support matrix](docs/support/support-matrix.md) for the evidence and platform boundary.
+- **Host support is narrow.** Only OpenCode 2.2.6, 2.2.7, and 2.3.0 on Linux/tmux are tested. The installed macOS/Herdr path is verified on 2.2.7 only; macOS 2.3.0 and mouse drag (checklist 1.7) are not claimed, and Windows/WSL is out of scope. Other host releases load with a runtime warning but are untested. See the [support matrix](docs/support/support-matrix.md) for the evidence and platform boundary.
 - **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. Every PR runs the deterministic fake, size, lifecycle, subagent, native-first, Vera, tool-surface, multi-location, and latency-smoke jobs; the real-model `npm run test:live` acceptance is opt-in in the nightly workflow (`ENSEMBLE_NIGHTLY_REAL=1`) and is never part of the PR gate.
 - **Terminal accessibility depends on the host.** Screen-reader output, high-contrast modes, font scaling, and mouse drag-copy are host features. Ensemble supplies glyph-and-word status, reduced-motion, `NO_COLOR`, and ASCII fallbacks; see the [terminal accessibility checklist](docs/verification/terminal-accessibility-checklist.md).
 - **Some surfaces stay native.** Arbitrary OpenCode slash commands are not proxied into the group chat, rich Markdown links are not clickable, and direct conversations have no separate Ensemble search or export.
