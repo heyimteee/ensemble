@@ -69,6 +69,10 @@
     "docs:check": "node --experimental-strip-types scripts/docs-check.mjs",
     "docs:reference": "node --experimental-strip-types scripts/reference-gen.mjs",
     "docs:reference:check": "node --experimental-strip-types scripts/reference-check.mjs",
+    "docs:site": "vitepress dev docs",
+    "docs:site:check": "node scripts/docs-site-check.mjs",
+    "docs:site:build": "node scripts/docs-site-check.mjs && vitepress build docs && node scripts/docs-site-artifacts.mjs",
+    "docs:site:preview": "vitepress preview docs",
     "backup": "node scripts/backup.mjs",
     "test:install:rc": "bash scripts/live-install-check.sh",
     "data": "node --experimental-strip-types src/v2/data-cli.ts"
@@ -95,6 +99,7 @@
     "@opencode/plugin": "2.2.1",
     "@types/node": "26.6.6",
     "babel-preset-solid": "1.9.12",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "vitepress": "1.6.4"
   }
 }

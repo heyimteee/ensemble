@@ -12,6 +12,8 @@ build/
 coverage/
 .cache/
 *.tsbuildinfo
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 
 # Local research, runtime data, and logs
 .scratch/
