@@ -199,32 +199,28 @@ Every requested directory is queried on the **one selected service**, sequential
 
 ## Documentation
 
-- [v2 implementation notes](docs/implementation.md)
-- [Documentation index](docs/README.md)
-- [ADR index](docs/adr/README.md): every accepted architecture decision
-- [ADR 0004: dispatch budgets and continuation](docs/adr/0004-dispatch-budgets-and-continuation.md)
-- [ADR 0009: conversation identity and sessions](docs/adr/0009-conversation-identity-and-sessions.md)
-- [ADR 0010: native turn ingestion](docs/adr/0010-native-turn-ingestion.md)
-- [ADR 0011: mention routing and budgets](docs/adr/0011-mention-routing-and-budgets.md)
-- [Native ingestion state and AGENTS v7 full E2E](docs/verification/2026-11-12-native-ingestion-v7-e2e.md)
-- [Native-first full E2E](docs/verification/2026-11-12-e2e.md)
-- [Contract v7 verification](docs/verification/2026-11-12-ticket-253.md)
-- [Native host event contract](docs/verification/2026-11-10-native-host-contract.md)
-- [Workspace v2 verification](docs/verification/2026-11-09-workspace-v2.md)
-- [Dispatch budget verification](docs/verification/2026-11-08-dispatch-budgets.md)
-- [v5.8 verification record](docs/verification/2026-11-05-v58.md)
-- [v5.7 verification record](docs/verification/2026-11-05-v57.md)
-- [v2 specification](https://github.com/heyimteee/ensemble/issues/17)
-- [v2 tickets](https://github.com/heyimteee/ensemble/issues)
-- [OpenCode host support range](docs/compatibility/opencode-host-range.md): supported CLI releases, peer range, and runtime warning
-- [Scale, soak, and local diagnostics](docs/operations/scale-and-monitoring.md): operating envelope, soak/leak harness, support bundle, and no-telemetry policy
-- [OpenCode 2.2.1 compatibility report](docs/compatibility/opencode-2.2.1.md): historical extension behavior, constraints, and gaps
-- [OpenTUI assessment](docs/assessments/opentui.md)
+- [Documentation home](docs/README.md): learning paths and every docs section
+- [Getting started](docs/getting-started/README.md)
+- [Concepts](docs/concepts/README.md)
+- [Guides](docs/guides/README.md)
+- [Reference](docs/reference/README.md)
+- [Operations](docs/operations/README.md)
+- [Security](docs/security/README.md)
+- [Privacy](docs/privacy/README.md)
+- [Contributing and evidence](docs/contributing/README.md)
+- [Documentation style guide](docs/style-guide.md)
 - [Glossary](GLOSSARY.md)
+- [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
-- [Security](SECURITY.md)
+- [Security policy](SECURITY.md)
 
-`npm run docs:check` asserts that the current contract, host, and Node claims stay aligned with the canonical constants and CI matrices. `npm run verify` also runs the CI job-graph check (`src/v2/ci-workflows.test.ts`), which keeps the PR/nightly suite ownership, timeouts, artifact uploads, and OpenCode pin aligned.
+Architecture decisions and verification records stay public in the
+[evidence index](docs/contributing/evidence.md), reached through the
+contributing hub. `npm run docs:check` asserts that the current contract, host,
+and Node claims stay aligned with the canonical constants and CI matrices, and
+that the user navigation and evidence index stay reachable. `npm run verify`
+also runs the CI job-graph check (`src/v2/ci-workflows.test.ts`), which keeps the
+PR/nightly suite ownership, timeouts, artifact uploads, and OpenCode pin aligned.
 
 ## License
 
