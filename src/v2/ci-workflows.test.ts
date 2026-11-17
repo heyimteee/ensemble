@@ -101,9 +101,9 @@ test("a live job without the require-mode contract is rejected", () => {
 })
 
 test("a live job without failure artifact upload is rejected", () => {
-  const text = read(verifyWorkflowPath).replace("actions/upload-artifact@v4", "actions/upload-artifact@v3")
+  const text = read(verifyWorkflowPath).replace("actions/upload-artifact@v7", "actions/upload-artifact@v3")
   const failures = checkVerifyWorkflow(text, supported)
-  assert.ok(failuresMatching(failures, /live-fake.*upload-artifact@v4/).length > 0)
+  assert.ok(failuresMatching(failures, /live-fake.*upload-artifact@v7/).length > 0)
 })
 
 test("a PR job over its documented time budget is rejected", () => {
@@ -176,7 +176,7 @@ test("the compatibility fake smoke keeps harness artifacts for a failure diagnos
     failuresMatching(checkCompatibilityWorkflow(noArtifactDir, supported), /ENSEMBLE_LIVE_ARTIFACTS/).length > 0,
   )
 
-  const noUpload = text.replace("        if: failure()\n        uses: actions/upload-artifact@v4\n        with:\n          name: live-artifacts-${{ matrix.opencode }}", "        uses: actions/upload-artifact@v4\n        with:\n          name: live-artifacts-${{ matrix.opencode }}")
+  const noUpload = text.replace("        if: failure()\n        uses: actions/upload-artifact@v7\n        with:\n          name: live-artifacts-${{ matrix.opencode }}", "        uses: actions/upload-artifact@v7\n        with:\n          name: live-artifacts-${{ matrix.opencode }}")
   assert.ok(
     failuresMatching(checkCompatibilityWorkflow(noUpload, supported), /live artifacts.*if: failure\(\)/).length > 0,
   )
