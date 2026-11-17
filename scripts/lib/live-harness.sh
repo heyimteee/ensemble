@@ -944,6 +944,18 @@ live_start_tui() {
     "$(live_command env "OPENCODE_PASSWORD=$LIVE_SERVER_PASSWORD" "$LIVE_OPENCODE_BIN" --server "$LIVE_SERVER_URL" --print-logs) 2>'$LIVE_LOGS/tui.log'"
 }
 
+# Ticket #287: pin the declared geometry and force a redraw (SIGWINCH). A
+# detached compatibility-host window can keep a stale size, which clips the
+# statusline/composer rows the suite types into. A missing window is tolerated;
+# the caller's readiness wait decides whether the TUI is usable.
+live_resize_tui() {
+  local session="$1"
+  local width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
+  local height="${ENSEMBLE_LIVE_TUI_HEIGHT:-60}"
+  "$LIVE_TMUX_BIN" resize-window -t "$session" -x "$width" -y "$height" 2>/dev/null \
+    || live_debug "could not resize $session; window may be gone"
+}
+
 live_wait_for_native_tui() {
   live_require_text "$LIVE_TUI_SESSION" "Ask anything" "$LIVE_TUI_TIMEOUT" "native OpenCode TUI"
 }
@@ -955,6 +967,12 @@ live_open_ensemble() {
     live_key "$LIVE_TUI_SESSION" Enter
     live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" "$LIVE_STEP_TIMEOUT" "Ensemble page"
   fi
+  # Ticket #287: the header can paint a frame before the statusline and
+  # composer mount. OpenCode 2.3.0 in CI typed into that partial page and lost
+  # the first key, so force the declared size and require the mode chip
+  # (live_require_statusline, below) before any caller can send input.
+  live_resize_tui "$LIVE_TUI_SESSION"
+  live_require_statusline "$LIVE_TUI_SESSION"
 }
 
 # --- pane select/interact (ticket #180/#183) ------------------------------
@@ -963,6 +981,20 @@ live_open_ensemble() {
 # context are core segments, so they survive every width; hints are droppable.
 live_status_line() {
   live_capture "$1" | grep -E '^ *((NORMAL|INSERT|COMMAND|VISUAL|V-LINE) +│)' | tail -n 1
+}
+
+# True once the statusline row (not just the page header) is on screen. A page
+# can paint its header several frames before this row and its composer exist.
+live_capture_statusline() {
+  [[ -n "$(live_status_line "$1")" ]]
+}
+
+# Ticket #287: readiness for input, so a timeout here is timing-classified and
+# a partial page never counts as an opened Ensemble surface.
+live_require_statusline() {
+  local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-Ensemble statusline}"
+  live_wait_for "$seconds" "$description" live_capture_statusline "$session" \
+    || live_fail_timing "TUI did not become ready: $description"
 }
 
 # True while pane selection owns the keyboard: its shipped hint is present.

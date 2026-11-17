@@ -53,6 +53,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
+- [Live TUI readiness after opening Ensemble](verification/2026-11-17-ticket-287.md): statusline-gated `live_open_ensemble`, a header-only guard test, the deterministic command-line retype ordering, and passing 2.3.0/2.2.7 fake suites
 - [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence
 - [OpenCode 2.3.0 compatibility](verification/2026-11-17-ticket-286.md): the host-range expansion, the 2.3.0 and 2.2.7 fake E2E runs, the passing host probe, the high-contrast focus-tone harness fix, the size matrix, and the loopback install proof
 - [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
