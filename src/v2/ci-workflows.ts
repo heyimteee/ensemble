@@ -449,8 +449,8 @@ export function checkReleaseWorkflow(text: string): string[] {
     if (/--dry-run/.test(publish)) {
       failures.push(`${file}: the publish job must not run in dry-run mode`)
     }
-    if (!/NODE_AUTH_TOKEN:\s*\$\{\{\s*secrets\.NPM_TOKEN\s*\}\}/.test(publish)) {
-      failures.push(`${file}: publish must authenticate with NODE_AUTH_TOKEN from the NPM_TOKEN secret`)
+    if (/NODE_AUTH_TOKEN|secrets\.NPM_TOKEN/.test(publish)) {
+      failures.push(`${file}: publish must use OIDC trusted publishing, not the NPM_TOKEN secret`)
     }
     if (!/^\s+id-token:\s*write\s*$/m.test(publish)) {
       failures.push(`${file}: publish must grant id-token: write for provenance`)
@@ -468,6 +468,9 @@ export function checkReleaseWorkflow(text: string): string[] {
   if (release) {
     if (!/gh release create/.test(release)) {
       failures.push(`${file}: github-release must create the GitHub release`)
+    }
+    if (!/--prerelease/.test(release)) {
+      failures.push(`${file}: github-release must mark prerelease versions as prereleases`)
     }
     if (!/--notes-file\b/.test(release)) {
       failures.push(`${file}: the GitHub release must publish the release notes from the changelog`)
