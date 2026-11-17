@@ -40,6 +40,8 @@ release they describe.
 
 ## Related
 
+- [Operations and support](../support/operations.md): the combined front door for
+  troubleshooting, support, recovery, security, and privacy.
 - [Support policy](../support/README.md): channel, response targets, and
   redaction rules.
 - [Support matrix](../support/support-matrix.md): supported hosts and known

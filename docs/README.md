@@ -19,6 +19,9 @@ separate docs tree.
 | Finish a task in the app | [Guides](guides/README.md) |
 | Look up a command, key, tool, or setting | [Reference](reference/README.md) |
 | Back up, upgrade, or recover an install | [Operations](operations/README.md) |
+| Fix an install, work, timeout, or model failure | [Troubleshooting](support/troubleshooting.md) |
+| Check install tags, platform limits, and diagnostics | [FAQ](support/faq.md) |
+| Find support, recovery, security, and privacy in one place | [Operations and support](support/operations.md) |
 | Assess security or privacy | [Security](security/README.md) or [Privacy](privacy/README.md) |
 | Get help or report a problem | [Support](support/README.md) |
 | Contribute code or documentation | [Contributing](contributing/README.md) |
@@ -100,7 +103,7 @@ separate docs tree.
 | [Operations](operations/README.md) | Backup, restore, upgrade, rollback, release operations, and diagnostics |
 | [Security](security/README.md) | Threat model, permission review, and accepted risks |
 | [Privacy](privacy/README.md) | Data classes, retention, export, and delete |
-| [Support](support/README.md) | Support policy, incident runbook, support matrix, and known limitations |
+| [Support](support/README.md) | Support policy, troubleshooting, FAQ, incident runbook, support matrix, and known limitations |
 | [Contributing](contributing/README.md) | Development workflow, docs process, ADRs, and verification evidence |
 
 Operations, security, privacy, and support are user-facing sections. ADRs,
