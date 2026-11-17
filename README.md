@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/heyimteee/ensemble/main/docs/public/logo.svg" width="120" height="120" alt="Ensemble logo: three vertical bars in blue, pale blue, and green">
+  <img src="docs/public/logo.svg" width="120" height="120" alt="Ensemble logo: three vertical bars in blue, pale blue, and green">
 </p>
 
 <h1 align="center">Ensemble</h1>
