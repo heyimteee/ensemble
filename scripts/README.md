@@ -156,7 +156,7 @@ rules are in
   `ENSEMBLE_LIVE_EXPECT_OPENCODE` to fail on a present-but-wrong version.
 - `npm run test:install:rc`: ticket #270's clean-install release-candidate
   proof. Packs the current package, serves it from a loopback-only npm registry,
-  installs it with `opencode plugin add` into an isolated OpenCode 2.2.7 host,
+  installs it with `opencode plugin add` into an isolated OpenCode 2.3.0 host,
   and checks `opencode plugin list`, the installed built package and its TUI
   dependencies, the server tools, and the TUI route and `/ensemble` command.
   It uses the loopback registry only for the candidate package; the declared
@@ -203,8 +203,8 @@ retries. A failing scenario stops the run and later scenarios are reported as
 PR feedback is split by cost; the expensive environment-sensitive checks are
 nightly. Every live job pins the same toolset through
 [`.github/actions/live-host`](../.github/actions/live-host/action.yml): Ubuntu
-24.04, Node 26.12.1, OpenCode 2.2.7 (the latest host in the compatibility
-matrix; `compatibility.yml` covers 2.2.6 and 2.2.7), the runner's `tmux`, fd
+24.04, Node 26.12.1, OpenCode 2.3.0 (the latest host in the compatibility
+matrix; `compatibility.yml` covers 2.2.6, 2.2.7, and 2.3.0), the runner's `tmux`, fd
 10.2.0, `npm ci`, and `npm run build` (the package exports load `dist/`, so a
 fresh checkout must build the runtime before a live suite starts a host).
 Every live job sets `ENSEMBLE_LIVE_REQUIRE=1`, writes
@@ -247,7 +247,7 @@ manual/opt-in run recorded in a verification record.
 ### Kept separate
 
 `compatibility.yml` runs `npm ci`, `npm run build`, the host probe, and the
-deterministic fake smoke on OpenCode 2.2.6 and 2.2.7; `node-matrix.yml` runs
+deterministic fake smoke on OpenCode 2.2.6, 2.2.7, and 2.3.0; `node-matrix.yml` runs
 `npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs
 `npm run docs:check`. The old `latency.yml` is removed: the smoke profile lives
 in `verify.yml` and the reference gate in `nightly.yml`. `src/v2/ci-workflows.ts`

@@ -14,15 +14,21 @@
  */
 
 /** OpenCode CLI releases exercised by the compatibility matrix. */
-export const SUPPORTED_OPENCODE_VERSIONS = ["2.2.6", "2.2.7"] as const
+export const SUPPORTED_OPENCODE_VERSIONS = ["2.2.6", "2.2.7", "2.3.0"] as const
 
 /** `@opencode/plugin` API packages shipped by the tested hosts. */
-export const OPENCODE_PLUGIN_PEER_RANGE = "2.2.6 || 2.2.7"
+export const OPENCODE_PLUGIN_PEER_RANGE = "2.2.6 || 2.2.7 || 2.3.0"
 
 /** OpenCode CLI release -> the `@opencode/plugin` API package it ships. */
 export const OPENCODE_PLUGIN_VERSION_BY_HOST: Readonly<Record<string, string>> = {
   "2.2.6": "2.2.6",
   "2.2.7": "2.2.7",
+  "2.3.0": "2.3.0",
+}
+
+function joinHosts(hosts: readonly string[]): string {
+  if (hosts.length <= 2) return hosts.join(" and ")
+  return `${hosts.slice(0, -1).join(", ")}, and ${hosts[hosts.length - 1]}`
 }
 
 /** Normalize `2.2.7`, `v2.2.7`, and `opencode v2.2.7` to `2.2.7`. */
@@ -47,7 +53,7 @@ export function hostCompatibilityWarning(value: unknown): string | undefined {
   const version = normalizeHostVersion(value)
   if (!version || hostVersionSupported(version)) return undefined
   return `OpenCode ${version} is not supported by this Ensemble build; `
-    + `supported hosts are ${SUPPORTED_OPENCODE_VERSIONS.join(" and ")} `
+    + `supported hosts are ${joinHosts(SUPPORTED_OPENCODE_VERSIONS)} `
     + `(@opencode/plugin ${OPENCODE_PLUGIN_PEER_RANGE}). `
     + "Ensemble will continue, but behavior on this version is untested."
 }

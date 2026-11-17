@@ -36,6 +36,7 @@ verify (Node 24.22.1)
 verify (Node 26.12.1)
 OpenCode 2.2.6
 OpenCode 2.2.7
+OpenCode 2.3.0
 ```
 
 Inspect the applied state without changing it:

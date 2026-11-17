@@ -208,8 +208,8 @@ function checkDocs(root = REPO_ROOT) {
   const failures = []
   const version = ENSEMBLE_BLOCK_VERSION
   const hosts = [...SUPPORTED_OPENCODE_VERSIONS]
-  const hostList = hosts.join(" and ")
-  const boldHostList = hosts.map((host) => `**${host}**`).join(" and ")
+  const hostList = joinClaim(hosts)
+  const boldHostList = joinClaim(hosts.map((host) => `**${host}**`))
 
   const verifyWorkflow = checkWorkflow(root, ".github/workflows/verify.yml", failures)
   const liveNode = workflowValue(verifyWorkflow, "NODE_VERSION") ?? ""

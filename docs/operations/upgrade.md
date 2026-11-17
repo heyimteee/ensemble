@@ -11,8 +11,8 @@ opencode plugin add @heyimteee/ensemble@<version>
 
 The first release is `0.1.0`; `0.1.0-rc.2` is the built candidate used to prove
 the install path. Read the release notes (#278) for the exact version and any
-late changes. Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6 and
-2.2.7.
+late changes. Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6,
+2.2.7, and 2.3.0.
 
 ## Before you upgrade
 

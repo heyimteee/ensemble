@@ -83,6 +83,7 @@ export const REQUIRED_STATUS_CHECKS: readonly string[] = [
   "verify (Node 26.12.1)",
   "OpenCode 2.2.6",
   "OpenCode 2.2.7",
+  "OpenCode 2.3.0",
 ]
 
 /** Split the `jobs:` block into job id -> job body. Top-level keys end it. */

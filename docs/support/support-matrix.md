@@ -26,8 +26,9 @@ procedure and its result legend.
 
 | Component | Supported | Status | Notes |
 |---|---|---|---|
-| OpenCode `2.2.6` | Yes | Compatibility matrix and fake smoke pass | The host range is `2.2.6 || 2.2.7` |
-| OpenCode `2.2.7` | Yes | Primary live host for the deterministic matrix | The PR matrix pins 2.2.7 |
+| OpenCode `2.2.6` | Yes | Compatibility matrix and fake smoke pass | The host range is `2.2.6 || 2.2.7 || 2.3.0` |
+| OpenCode `2.2.7` | Yes | Compatibility matrix and fake smoke pass | The previous primary live host |
+| OpenCode `2.3.0` | Yes | Primary live host for the deterministic matrix | The PR matrix pins 2.3.0; the focused-text harness accepts the host's `#eeeeee` high-contrast tone |
 | Other OpenCode 2.x releases | No | Untested | The plugin loads with a runtime warning; behavior is not supported |
 | Node `22.23.4` | Yes | Unit and typecheck matrix | Minimum engine floor |
 | Node `24.22.1` | Yes | Unit and typecheck matrix | Supported for the package |
@@ -35,7 +36,7 @@ procedure and its result legend.
 | Node below `22.23.4` | No | Fails at plugin load | The load-time gate names the supported range and refuses to start |
 | Other Node lines not listed above | No | Untested | Not in the matrix; no support claim |
 
-The package engine is `>=22.23.4` and the peer range is `2.2.6 || 2.2.7`.
+The package engine is `>=22.23.4` and the peer range is `2.2.6 || 2.2.7 || 2.3.0`.
 An unsupported OpenCode host still loads Ensemble, but Ensemble writes a
 runtime warning. That warning is a boundary notice, not a compatibility pass.
 
@@ -59,8 +60,8 @@ require all of the following:
 - Linux with tmux on `PATH` (the harness uses tmux panes and captures).
 - Node `26.12.1`; the package engine floor is lower, but the live matrix uses
   the pinned live version.
-- The pinned OpenCode host (`2.2.7` for the PR matrix; `2.2.6` for the
-  compatibility run) and `fd` (`10.2.0` in CI).
+- The pinned OpenCode host (`2.3.0` for the PR matrix; `2.2.6` and `2.2.7` for
+  the compatibility runs) and `fd` (`10.2.0` in CI).
 - Locked dependencies installed with `npm ci`.
 - An isolated fake provider for the deterministic suites, or a configured host
   model catalog for the real-model acceptance.
@@ -87,7 +88,7 @@ symptom through the [support policy](README.md) if it is not listed.
   checklist is not evidence.
 - **Windows is out of scope.** WSL is untested and is not a substitute for
   Linux/tmux evidence.
-- **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 are tested. Other
+- **Host support is narrow.** Only OpenCode 2.2.6, 2.2.7, and 2.3.0 are tested. Other
   releases load with a warning and may break in untested ways.
 - **Live evidence is platform-bound.** The real-model acceptance is opt-in and
   not part of the PR gate. A local run without the pinned tools is not CI

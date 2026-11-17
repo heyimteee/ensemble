@@ -72,8 +72,8 @@ Date: `<YYYY-MM-DD>`
 
 ## 5. Clean-install proof
 
-- [ ] `npm run test:install:rc` passed against an isolated OpenCode **2.2.7**
-      host (`OPENCODE_BIN=<opencode-2.2.7>/bin/opencode`), using a loopback
+- [ ] `npm run test:install:rc` passed against an isolated OpenCode **2.3.0**
+      host (`OPENCODE_BIN=<opencode-2.3.0>/bin/opencode`), using a loopback
       registry or a Git spec. No workspace link and no user global
       configuration were used.
 - [ ] `opencode plugin list` reports the package source and exact version.
@@ -90,7 +90,8 @@ Date: `<YYYY-MM-DD>`
 - [ ] Every required check is green on the release commit: `verify`,
       `live-fake`, `live-native`, `live-multilocation`, `latency-smoke`,
       `docs:check`, `verify (Node 22.23.4)`, `verify (Node 24.22.1)`,
-      `verify (Node 26.12.1)`, `OpenCode 2.2.6`, and `OpenCode 2.2.7`.
+      `verify (Node 26.12.1)`, `OpenCode 2.2.6`, `OpenCode 2.2.7`, and
+      `OpenCode 2.3.0`.
 - [ ] The `Release` workflow dry run passed: preflight, package, SBOM, and
       `npm publish --dry-run` with no registry token.
 - [ ] No required status context was renamed or invented; the ruleset matches

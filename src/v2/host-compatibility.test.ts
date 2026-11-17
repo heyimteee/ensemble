@@ -26,11 +26,13 @@ test("host versions are normalized without accepting unrelated text", () => {
 })
 
 test("only the tested OpenCode CLI releases are supported", () => {
-  assert.deepEqual([...SUPPORTED_OPENCODE_VERSIONS], ["2.2.6", "2.2.7"])
+  assert.deepEqual([...SUPPORTED_OPENCODE_VERSIONS], ["2.2.6", "2.2.7", "2.3.0"])
   assert.equal(hostVersionSupported("2.2.6"), true)
   assert.equal(hostVersionSupported("opencode v2.2.7"), true)
+  assert.equal(hostVersionSupported("2.3.0"), true)
   assert.equal(hostVersionSupported("2.2.5"), false)
   assert.equal(hostVersionSupported("2.2.8"), false)
+  assert.equal(hostVersionSupported("2.3.1"), false)
   assert.equal(hostVersionSupported(undefined), false)
 })
 
@@ -69,12 +71,12 @@ test("an unsupported host produces one clear warning", () => {
   assert.equal(messages.length, 1)
   assert.equal(warning, messages[0])
   assert.match(warning ?? "", /OpenCode 2\.2\.5 is not supported/)
-  assert.match(warning ?? "", /2\.2\.6 and 2\.2\.7/)
-  assert.match(warning ?? "", /@opencode\/plugin 2\.2\.6 \|\| 2\.2\.7/)
+  assert.match(warning ?? "", /2\.2\.6, 2\.2\.7, and 2\.3\.0/)
+  assert.match(warning ?? "", /@opencode\/plugin 2\.2\.6 \|\| 2\.2\.7 \|\| 2\.3\.0/)
 })
 
 test("a supported or unknown host produces no warning", () => {
-  for (const ctx of [{ app: { version: "2.2.6" } }, { app: { version: "v2.2.7" } }, { app: {} }, {}]) {
+  for (const ctx of [{ app: { version: "2.2.6" } }, { app: { version: "v2.2.7" } }, { app: { version: "2.3.0" } }, { app: {} }, {}]) {
     const messages: string[] = []
     const warning = warnUnsupportedHost(ctx, (message) => messages.push(message))
     assert.equal(warning, undefined)
