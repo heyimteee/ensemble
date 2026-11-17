@@ -90,9 +90,9 @@
   "devDependencies": {
     "@babel/core": "7.29.7",
     "@babel/preset-typescript": "7.27.1",
-    "@opencode/plugin": "2.2.1",
+    "@opencode/plugin": "2.3.0",
     "@types/node": "26.6.6",
-    "babel-preset-solid": "1.9.12",
+    "babel-preset-solid": "1.9.19",
     "typescript": "7.0.2"
   }
 }
