@@ -2715,7 +2715,11 @@ if [[ "$FD_AVAILABLE" == "1" ]]; then
   live_require_text "$LIVE_TUI_SESSION" "handover.md" 10 "cache-backed filter still finds the file"
   sleep 0.8
   fd_after=$(wc -l <"$LIVE_BASE/fd-invocations" 2>/dev/null || echo 0)
-  [[ "$fd_before" == "$fd_after" ]] \
+  # The cached index can perform one background refresh during a slow CI run.
+  # Per-keystroke discovery would add one invocation for every typed character;
+  # allow only that single refresh so the performance contract stays enforced.
+  fd_delta=$(( fd_after - fd_before ))
+  (( fd_delta <= 1 )) \
     || live_fail "filtering spawned fd per keystroke ($fd_before -> $fd_after)"
   live_key "$LIVE_TUI_SESSION" Escape
 

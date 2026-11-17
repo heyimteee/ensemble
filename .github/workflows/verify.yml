@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -47,7 +47,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -77,7 +77,7 @@ jobs:
         run: npm run test:live:subagent
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-fake-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -91,7 +91,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -117,7 +117,7 @@ jobs:
         run: npm run test:live:tool-surface
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-native-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -131,7 +131,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -149,7 +149,7 @@ jobs:
         run: npm run test:live:multilocation
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-multilocation-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
@@ -163,7 +163,7 @@ jobs:
     env:
       ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -185,7 +185,7 @@ jobs:
         run: npm run test:live:latency
       - name: Upload live failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: latency-smoke-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
