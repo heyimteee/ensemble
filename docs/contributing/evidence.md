@@ -1,3 +1,9 @@
+---
+title: Evidence index
+description: Public architecture decisions, verification records, assessments, and compatibility evidence.
+version: 0.1.x
+---
+
 # Evidence index
 
 Public engineering evidence: architecture decisions, verification records,
@@ -32,6 +38,10 @@ its tickets.
 
 ## Verification records
 
+- [Ticket #301 documentation acceptance](../verification/2026-11-17-ticket-301-acceptance.md): the five-minute human quickstart walkthrough, the heading-anchor and terminal-hero fixes, the full 185-route desktop/mobile/light/dark scan, zero axe violations, and the remaining external Pages/ruleset actions
+- [Ticket #301 final documentation review corrections](../verification/2026-11-17-ticket-301-review-fixes.md): rendered-site anchors from the VitePress renderer and built HTML crawl, stable-0.1.0 operations reconciliation, non-destructive synthetic media capture, dynamic privacy markers, fast/full docs CI split, Markdown lint, exact evidence links, terminology, and truthful README badges
+- [Documentation quality gates and quickstart audit](../verification/2026-11-17-ticket-310.md): the extended docs contract (inventory, frontmatter, links/anchors, fences, shell, canonical claims, reference, media, site build), the packed-install quickstart TUI E2E and 29.4 s timing, the docs/rationale PR guard, and the unrun human-usability limit
+- [Documentation visuals and accessibility](../verification/2026-11-17-ticket-309.md): the synthetic terminal replay and screenshots, rendered Mermaid diagrams with accessible titles/descriptions, manifest and alt/caption checks, keyboard/heading/contrast/reduced-motion measurements, and the remaining unrun browser and install limits
 - [Public release readiness — parent #268](../verification/2026-11-17-ticket-268.md): the released `0.1.0-rc.2` state, every child ticket result including #277 macOS verification and #281–#287, the final-tip install/fake/soak evidence, green required CI at `a7f1eb3`, the full macOS checklist including 1.7, the public-registry smoke on 2.2.7/2.3.0, npm `latest`/`next` behavior, and the remaining announcement decision
 - [Live TUI readiness after opening Ensemble](../verification/2026-11-17-ticket-287.md): statusline-gated `live_open_ensemble`, a header-only guard test, the deterministic command-line retype ordering, and passing 2.3.0/2.2.7 fake suites
 - [Four-hour enforced soak — 0.1.0-rc.2 final tip](../verification/2026-11-17-soak.md): PASS on both supported hosts, OpenCode 2.2.7 and 2.3.0, with 240 samples over 14,439 s each, 0 failures, settled queue/native state, and growth within both gates
@@ -91,6 +101,32 @@ its tickets.
 - [v5.8 verification](../verification/2026-11-05-v58.md): System Agent init and deliberate skill invocation
 - [v5.7 verification](../verification/2026-11-05-v57.md): persistent modes, native key ownership, and interaction polish
 - [v5.6 verification](../verification/2026-11-05-v56.md): modal interactions, composer editing, mouse copy, and statusline
+
+### Earlier verification records
+
+These older records predate the current evidence index. They are retained
+unchanged and linked here so the published site keeps every record reachable
+from the contributing hub.
+
+- [Ensemble v2 verification — 2026-10-30](../verification/2026-10-30.md)
+- [Ensemble v5 acceptance — 2026-11-01](../verification/2026-11-01.md)
+- [Ensemble v5.1 wizard verification — 2026-11-02](../verification/2026-11-02.md)
+- [Ticket #67 verification — chat surfaces](../verification/2026-11-03-ticket-67.md)
+- [Ticket #68 verification — approvals reflect reality](../verification/2026-11-03-ticket-68.md)
+- [Ticket #69 verification — settings stylization](../verification/2026-11-03-ticket-69.md)
+- [Ticket #70 verification — truthful activity states](../verification/2026-11-03-ticket-70.md)
+- [Ticket #71 verification — completion handoff and review](../verification/2026-11-03-ticket-71.md)
+- [Ticket #72 verification — bubble rendering](../verification/2026-11-03-ticket-72.md)
+- [Ticket #73 verification — handoff instructions and review framing](../verification/2026-11-03-ticket-73.md)
+- [Ticket #74 verification — streaming settlement](../verification/2026-11-03-ticket-74.md)
+- [Ticket #75 verification — conversation blockers](../verification/2026-11-03-ticket-75.md)
+- [Ticket #76 verification — state truth](../verification/2026-11-03-ticket-76.md)
+- [Ticket #77 verification — conversation surfaces](../verification/2026-11-04-ticket-77.md)
+- [v5.9 T2 verification — CI fake-live guardrail](../verification/2026-11-05-v59-t2.md)
+- [v5.9 T7 verification — tracker and agent-doc hygiene](../verification/2026-11-05-v59-t7.md)
+- [Single service per host and safe recovery (#151)](../verification/2026-11-08-single-service.md)
+- [Host-realm tools, events, activity, and alignment (#157)](../verification/2026-11-09-host-realm.md)
+- [Pane interaction verification (#186)](../verification/2026-11-09-pane-interaction.md)
 
 ## Implementation and assessments
 

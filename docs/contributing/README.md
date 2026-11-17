@@ -1,3 +1,9 @@
+---
+title: Contributing
+description: Development workflow, documentation process, evidence, and review boundaries.
+version: 0.1.x
+---
+
 # Contributing
 
 How to work on Ensemble code and documentation. Start with the repository
@@ -24,10 +30,32 @@ docs index.
 - [Evidence index](evidence.md): ADRs, verification records, implementation
   notes, assessments, and compatibility evidence.
 
-Update user documentation when externally visible behavior changes. Keep ADRs
-and verification records public, but do not put them in the primary user
-navigation; link them from the [evidence index](evidence.md) or as a **Go
-deeper** link at the end of a concept page.
+Build the docs site locally with `npm run docs:site` and publish-preview it with
+`npm run docs:site:preview`. `npm run docs:site:build` runs the sidebar,
+reachability, redirect, SEO, sitemap, generated-artifact, and built-anchor checks
+before the VitePress build. `npm run docs:check` is the full local gate:
+Markdown lint, inventory, frontmatter, links and rendered anchors, Markdown
+fences, shell syntax, canonical version/host/Node claims, generated reference
+freshness, media, the VitePress build, and the built-site anchor crawl. CI runs
+`npm run docs:check:fast` in the separate Docs job; the Docs site job owns the
+single VitePress build. Fixture tests use the explicit `--skip-site-build`
+mode.
+
+Update user documentation when externally visible behavior changes. If no doc
+update is needed, put a `docs-not-needed: <reason>` line in the pull request
+body; the `docs-rationale` workflow checks the changed-file list and PR body
+from the trusted base checkout. It is not yet a required status check on
+`main`: adding it needs an explicit maintainer decision and a GitHub ruleset
+change, which this repository does not configure. Until then the workflow is
+advisory and the program merge can proceed without claiming external
+enforcement. Keep ADRs and verification records public, but do not put them in
+the primary user navigation; link them from the [evidence index](evidence.md)
+or as a **Go deeper** link at the end of a concept page.
+
+The Docs site workflow builds the Pages artifact on pull requests and deploys
+only from `main` after the repository's Pages environment is enabled. Enabling
+Pages and publishing the site are external maintainer actions; this branch
+does not deploy the site or claim that it is live.
 
 ## Review and process
 
@@ -56,5 +84,6 @@ deeper** link at the end of a concept page.
   redaction rules.
 - Do not rewrite an ADR or verification record to match a new claim; add a new
   record or supersede the decision.
-- Do not hand-maintain generated reference lists. The reference section documents
-  its owning sources until generation lands.
+- Do not hand-maintain generated reference lists. Run `npm run docs:reference`
+  after changing a catalog; `npm run docs:check` fails when a generated page is
+  stale, missing, or unreachable from the reference index.

@@ -1,3 +1,9 @@
+---
+title: Package rollback
+description: Reverse a package upgrade, with state rollback only when required.
+version: 0.1.x
+---
+
 # Package rollback
 
 Ticket #273. Use this when a release upgrade must be reversed: the previous
@@ -70,8 +76,17 @@ Expected evidence:
 | Doctor against restored state | Zero mismatches |
 | Busy service | `busy`; nothing is written |
 
-A real package downgrade rehearsal is blocked because `0.1.0-rc.2` is the first
-published version, so there is no earlier installable version to return to.
-Record it in the release sign-off (#278) rather than claiming it here. The
-blocked check is listed in
+The published prerelease history provides earlier installable versions. Stable
+`0.1.0` has the same runtime as `0.1.0-rc.3`, so a package-only rollback can pin
+the exact prerelease:
+
+```sh
+opencode plugin add @heyimteee/ensemble@0.1.0-rc.3
+```
+
+`0.1.0-rc.2` is also installable for a deliberate older pin. A live
+package-downgrade rehearsal was not recorded in #273 because at that time
+`0.1.0-rc.2` was the only published version; the state rollback rehearsal above
+is the recorded evidence. Do not claim a downgrade rehearsal that did not run.
+The historical blocked check is listed in
 [the ticket #273 record](../verification/2026-11-16-ticket-273.md).

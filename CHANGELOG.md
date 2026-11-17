@@ -43,8 +43,8 @@ promotion of the validated release candidate to the default npm channel.
 - Git-spec installs fail upstream in OpenCode 2.2.7; use npm.
 - Herdr prefix control is inconclusive host evidence; automatic
   copy-on-release follows the host's Ghostty setting.
-- There is no earlier public version, so a package downgrade cannot be
-  rehearsed.
+- A live package-downgrade rehearsal from stable `0.1.0` has not been recorded;
+  the public prereleases remain installable.
 - This is a 0.x release: minor versions may still change APIs.
 
 ## [0.1.0-rc.3] - 2026-11-17

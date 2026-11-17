@@ -1,6 +1,16 @@
-# Ensemble
+<p align="center">
+  <img src="docs/public/logo.svg" width="120" height="120" alt="Ensemble logo: three vertical bars in blue, pale blue, and green">
+</p>
 
-**Your persistent agent team, inside OpenCode.**
+<h1 align="center">Ensemble</h1>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@heyimteee/ensemble"><img src="https://img.shields.io/npm/v/@heyimteee/ensemble.svg" alt="npm version"></a>
+  <a href="https://github.com/heyimteee/ensemble/actions/workflows/verify.yml"><img src="https://github.com/heyimteee/ensemble/actions/workflows/verify.yml/badge.svg" alt="verify workflow status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
+</p>
+
+<p align="center"><strong>Your persistent agent team, inside OpenCode.</strong></p>
 
 Ensemble gives you one group chat with named agents, a leader who routes the
 work, and a Work pane that shows what every agent is doing while each agent's
@@ -10,13 +20,14 @@ native OpenCode session runs underneath.
 opencode plugin add @heyimteee/ensemble@0.1.0
 ```
 
-<!-- docs visual: hero terminal recording of install, /ensemble, a first group reply, and the Work pane; ticket #309 owns the asset. -->
+<a href="docs/README.md#see-it-in-motion">
+  <img src="docs/public/media/workspace-shell.png" width="1200" alt="The Ensemble three-pane workspace at 140 columns: the rail lists Ada, Nova, and Rook in the synthetic acme-notes workspace; the chat shows a group message; the Work pane shows Ada's WORKING card and its hop budget." />
+</a>
 
-> **Visual placeholder.** The documentation site will open with a short terminal
-> recording of the three-pane workspace: agents and workspaces on the left, the
-> group chat in the middle, and Work on the right. Until the recording lands,
-> the [quickstart](docs/getting-started/quickstart.md) walks through the same
-> screen with copyable commands and expected output.
+*The three-pane workspace in the synthetic Acme Notes fixture. The
+[documentation home](docs/README.md#see-it-in-motion) plays the short terminal
+replay of install, `/ensemble`, a group reply, the Work card, and the native
+session. Captures use synthetic data only; the install command is illustrative.*
 
 [Get started](docs/getting-started/README.md) ·
 [What is Ensemble?](docs/getting-started/what-is-ensemble.md) ·

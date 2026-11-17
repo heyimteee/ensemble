@@ -1,3 +1,9 @@
+---
+title: Operations
+description: Back up, upgrade, roll back, diagnose, and release Ensemble safely.
+version: 0.1.x
+---
+
 # Operations
 
 Procedures for running Ensemble safely: back up durable state, upgrade the
@@ -10,7 +16,7 @@ process. These pages are for operators and maintainers; daily use is covered in
 | Task | Page |
 |---|---|
 | Back up or restore the durable-state document and workspace config | [Backup and restore](backup-restore.md) |
-| Upgrade a pre-ledger workspace to the native-first release | [Upgrade from the pre-release](upgrade.md) |
+| Upgrade a prerelease or checkout install to stable `0.1.0` | [Upgrade to stable 0.1.0](upgrade.md) |
 | Reverse a package upgrade, with state rollback only when required | [Package rollback](rollback.md) |
 | Resolve a broken workspace, stuck work, or suspected data loss | [Incident runbook](../support/incident-runbook.md) |
 
@@ -40,6 +46,8 @@ release they describe.
 
 ## Related
 
+- [Operations and support](../support/operations.md): the combined front door for
+  troubleshooting, support, recovery, security, and privacy.
 - [Support policy](../support/README.md): channel, response targets, and
   redaction rules.
 - [Support matrix](../support/support-matrix.md): supported hosts and known

@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Go from a fresh install to a first group reply and a finished work item in about ten minutes.
+description: Go from a fresh install to a first group reply and a finished work item, with expected output at each step.
 version: 0.1.x
 ---
 
@@ -9,6 +9,10 @@ version: 0.1.x
 Install the stable `0.1.0` package, create two agents and a workspace, send one
 message, and watch the work item finish. The example uses an `acme-notes`
 workspace with two synthetic agents, `Nova` and `Rook`.
+
+The automated packed-install smoke for this path completes in roughly 30
+seconds; the recorded scripted runs were 29.4 s, 31.6 s, and 34.9 s. That is not
+a human completion estimate; install and model latency vary by machine.
 
 ## Before you start
 

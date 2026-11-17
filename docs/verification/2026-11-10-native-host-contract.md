@@ -38,6 +38,8 @@ read the user's live host.
 | `npm run test:live:probe` with `ENSEMBLE_PROBE_WRITE=1` | Regenerates the committed fixture; the committed file in this branch came from that command. |
 | `git diff --check` | **Pass** — no whitespace errors. |
 
+<a name="227-re-verification"></a>
+
 ## 2.2.7 re-verification
 
 Ticket [#233](https://github.com/heyimteee/ensemble/issues/233) re-ran the probe

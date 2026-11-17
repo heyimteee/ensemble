@@ -1,3 +1,9 @@
+---
+title: Launch plan — Ensemble 0.1.0-rc.2
+description: Historical launch plan for the 0.1.0-rc.2 prerelease.
+version: 0.1.0-rc.2
+---
+
 # Launch plan — Ensemble 0.1.0-rc.2
 
 Status: **published 2026-11-17 as a prerelease.** Tag `v0.1.0-rc.2`, npm

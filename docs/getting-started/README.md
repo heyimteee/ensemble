@@ -1,7 +1,14 @@
+---
+title: Getting started
+description: Choose the install, quickstart, first-team, and upgrade path for a new installation.
+version: 0.1.x
+---
+
 # Getting started
 
 Install Ensemble, open the workspace, and reach your first group reply with a
-small agent team. The path takes about ten minutes.
+small agent team. The automated packed-install smoke completes this path in about
+half a minute; a person's install and model latency will differ.
 
 ## Before you install
 
@@ -27,10 +34,12 @@ boundary and known limitations before you start.
 
 ## If a step fails
 
-Start with the troubleshooting section on the page you are on. If the symptom is
-not listed, read the [support policy](../support/README.md) before filing an
-issue, and use the [incident runbook](../support/incident-runbook.md) for a
-broken workspace, stuck work, or suspected data loss.
+Start with the troubleshooting section on the page you are on, then read
+[Troubleshooting](../support/troubleshooting.md) for install, plugin, workspace,
+work, native-turn, and model symptoms. If the symptom is not listed, read the
+[support policy](../support/README.md) before filing an issue, and use the
+[incident runbook](../support/incident-runbook.md) for a broken workspace, stuck
+work, or suspected data loss.
 
 ## Next
 

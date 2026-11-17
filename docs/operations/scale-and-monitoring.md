@@ -1,3 +1,9 @@
+---
+title: Scale, soak, and local diagnostics
+description: Tested operating envelope, soak harness, and redacted local diagnostics.
+version: 0.1.x
+---
+
 # Scale, soak, and local diagnostics
 
 Ticket #276. This page states the production operating envelope, how to run the

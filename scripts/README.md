@@ -123,6 +123,14 @@ rules are in
   stalled/retrying labels remain service/TUI-seam tests because no public live
   RPC can inject those durable states; the script logs those skips. Expect
   about six minutes.
+- `npm run test:live:quickstart`: ticket #310's deterministic onboarding proof.
+  Packs the package, serves only `@heyimteee/ensemble` from a loopback registry,
+  installs it with `opencode plugin add` into an isolated host, opens
+  `/ensemble`, creates two agents and the `acme-notes` workspace through the TUI
+  wizards, sends one group message, and observes the Work card reach `REPLIED`.
+  It records per-phase timings and sanitized logs; the fake provider is the only
+  model. This is a timed smoke, not a human-usability study. It is part of the
+  `live-fake` PR job.
 - `npm run test:live:latency`: the latency budget probe on the isolated fake
   host. It gates rail keypress p95 (50 ms reference) and the deterministic
   patch-card p95 (250 ms reference), and reports first-token only. The
@@ -198,6 +206,37 @@ The aggregate runner streams each scenario's output unchanged and never
 retries. A failing scenario stops the run and later scenarios are reported as
 `NOT RUN`. Skip handling follows the contract below.
 
+## Documentation gate
+
+`npm run docs:check` is the full local and release docs contract. It runs
+Markdown lint, validates the page inventory and section reachability, per-page
+frontmatter (title, description, and version), internal links and
+VitePress-rendered heading anchors across `docs/` and the root Markdown files,
+balanced code fences and shell syntax, the canonical package, contract, host,
+and Node claims, generated-reference freshness, media, the VitePress site build,
+and an independent crawl of the built HTML ids and fragment links.
+
+`npm run docs:check:fast` is the separate pull-request Docs gate. It runs the
+same lint and source checks without a VitePress build, so the single PR site
+build belongs to the Docs site workflow. The fixture entry point is
+`node --experimental-strip-types scripts/docs-check.mjs --fast` (the older
+`--skip-site-build` spelling remains an alias). A missing required page, link,
+anchor, or frontmatter field is a validation failure (exit 1), not an uncaught
+error.
+
+`npm run docs:lint` runs `markdownlint-cli2` with the repository configuration.
+It deliberately enables a small structural rule set (heading increments, ATX
+style, one H1, fenced-code language) rather than restyling historical prose.
+
+`scripts/docs-rationale.mjs` backs the `docs-rationale` workflow. A pull
+request that changes user-visible source must update documentation or include a
+`docs-not-needed: <reason>` line in its body. Test-only and workflow/tooling
+changes are exempt. The workflow runs from `pull_request_target`, checks out the
+trusted base commit, requests only `contents: read` and `pull-requests: read`,
+and never executes pull-request code or reads secrets. It is not yet a required
+status check on `main`; enabling it needs an explicit maintainer ruleset
+change, so the program merge treats it as advisory until then.
+
 ## CI
 
 PR feedback is split by cost; the expensive environment-sensitive checks are
@@ -217,7 +256,7 @@ tool is missing or the pinned Node/OpenCode version differs.
 | Job | Suites | Timeout | Observed |
 | --- | --- | ---: | ---: |
 | `verify` | `npm run verify` (typecheck + unit suite, including the CI job-graph check) | 15 min | ~1 min |
-| `live-fake` | `test:live:fake:all`, `test:live:sizes`, `test:live:lifecycle`, `test:live:subagent` | 45 min | ~17 min |
+| `live-fake` | `test:live:fake:all`, `test:live:sizes`, `test:live:lifecycle`, `test:live:quickstart`, `test:live:subagent` | 45 min | ~18 min |
 | `live-native` | `test:live:native-first`, `test:live:vera`, `test:live:tool-surface` | 20 min | ~3 min |
 | `live-multilocation` | `test:live:multilocation` | 20 min | ~3 min |
 | `latency-smoke` | `test:live:latency` (`smoke` profile: 500 ms rail, 5000 ms card) | 20 min | ~3 min |
@@ -225,10 +264,10 @@ tool is missing or the pinned Node/OpenCode version differs.
 The live jobs run in parallel after checkout, so the PR critical path is the
 longest live job plus tool setup: target 20 minutes, budget 30 minutes wall
 clock. The sum of job timeouts is 120 minutes; the deterministic suite sum is
-about 20 minutes on the local reference host (fake 8 min, lifecycle 6 min,
-sizes 1 min, multilocation 1 min, the native suites under 1 min, latency under
-1 min). The `live-fake` timeout is 45 minutes to absorb a slower shared runner
-without letting one job hang indefinitely.
+about 22 minutes on the local reference host (fake 8 min, lifecycle 6 min,
+quickstart 2 min, sizes 1 min, multilocation 1 min, the native suites under
+1 min, latency under 1 min). The `live-fake` timeout is 45 minutes to absorb a
+slower shared runner without letting one job hang indefinitely.
 
 ### Nightly (`nightly.yml`)
 
@@ -248,12 +287,17 @@ manual/opt-in run recorded in a verification record.
 
 `compatibility.yml` runs `npm ci`, `npm run build`, the host probe, and the
 deterministic fake smoke on OpenCode 2.2.6, 2.2.7, and 2.3.0; `node-matrix.yml` runs
-`npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs
-`npm run docs:check`. The old `latency.yml` is removed: the smoke profile lives
-in `verify.yml` and the reference gate in `nightly.yml`. `src/v2/ci-workflows.ts`
+`npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1; `docs.yml` installs
+dependencies and runs the fast `npm run docs:check:fast` without a site build.
+`docs-site.yml` owns the single PR VitePress build, validates the built anchors,
+and deploys the Pages artifact only from `main` once the Pages environment is
+enabled. `docs-rationale.yml` reports the docs update or `docs-not-needed`
+decision; it is advisory until a maintainer adds it to the main ruleset.
+The old `latency.yml` is removed: the smoke profile lives in `verify.yml` and
+the reference gate in `nightly.yml`. `src/v2/ci-workflows.ts`
 and its test assert this job graph, the suite ownership, the timeouts, the
 artifact uploads, the `ENSEMBLE_LIVE_REQUIRE=1` contract, the runtime build
-after dependency install, and the OpenCode pin.
+after dependency install, the trusted PR-guard shape, and the OpenCode pin.
 
 ## Skip versus fail
 
@@ -430,6 +474,31 @@ viewport-sensitive transcript assertions. Use the size matrix for other
 geometries; running the full scenario at a smaller height can fail because a
 finalized rich reply is not visible in the shorter pane, not because the Work
 layout is wrong.
+
+## Documentation media
+
+`npm run docs:media` regenerates the committed screenshots and terminal replay
+in `docs/public/media/` from an isolated synthetic **Acme Notes** workspace. It
+starts the deterministic fake provider and a temporary OpenCode 2.3.0 host
+through the live harness, captures the real TUI at 110×34 with
+`ENSEMBLE_REDUCED_MOTION=1`, then widens the TUI to 140×40 for the Work-pane
+still. The temporary project path is redacted to `~/dev/acme-notes`; the
+renderer refuses `/home/`, `/tmp/opencode/`, the running account's username and
+host, and fixture markers before writing a file. The identity is derived at run
+time, not stored in the repository.
+
+The command is manual and is **not** run by the docs build. It needs the built
+`dist/` tree (`npm run build`), Node, tmux, OpenCode, Python 3.11+, and Pillow.
+It also writes `MANIFEST.json` with the SHA-256 and natural size of every asset.
+The install command in the hero is shown for orientation, not executed; the
+workspace, messages, Work card, and native session are captured from the local
+host.
+
+`npm run docs:media:check` is the cheap CI check. It validates the manifest and
+file hashes, every `DocsFigure` alt text and caption, the terminal-hero poster
+description and text summary, Mermaid `accTitle`/`accDescr` coverage, and
+user-page heading order. It never starts a host. The docs check and docs-site
+check both include it.
 
 ## Backup and restore
 

@@ -1,3 +1,9 @@
+---
+title: Documentation style guide
+description: Voice, terminology, page template, code sample rules, and visual rules for Ensemble docs.
+version: 0.1.x
+---
+
 # Documentation style guide
 
 This guide applies to every page under `docs/`, the root `README.md`, and
@@ -171,6 +177,14 @@ Rules:
   wide terminal to show the point.
 - Optimize images before committing and keep the source asset next to the
   generated file when the build supports it.
+- Use `<DocsFigure>` for screenshots. It requires `src`, a useful `alt`, a
+  `caption`, and the natural `width`/`height`; the media check verifies all
+  four.
+- Every Mermaid fence declares `accTitle` and `accDescr`. The rendered SVG
+  carries them as its accessible title and description.
+- Regenerate captures with `npm run docs:media`, not during a docs build. Use
+  `npm run docs:media:check` for the cheap manifest, alt-text, caption, and
+  diagram check.
 
 ## Links, navigation, and redirects
 
@@ -196,4 +210,9 @@ Rules:
 - [ ] Internal evidence is a **Go deeper** link, not a step.
 - [ ] The page is linked from the right section index.
 - [ ] Moved entries are recorded in the redirect map.
-- [ ] `npm run docs:check` and `npm run verify` pass.
+- [ ] The page has title, description, and version front matter; the H1 matches
+      the title.
+- [ ] `npm run docs:check` passes, including its default docs-site build and
+      built-anchor crawl. CI runs `npm run docs:check:fast` in the separate Docs
+      job; the Docs site job owns the one PR site build.
+- [ ] `npm run verify` passes.

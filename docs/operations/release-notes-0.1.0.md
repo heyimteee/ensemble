@@ -1,3 +1,9 @@
+---
+title: Ensemble 0.1.0 release notes
+description: Stable 0.1.0 release notes, package contents, and verification summary.
+version: 0.1.0
+---
+
 # Ensemble 0.1.0 release notes
 
 Status: **stable 0.x release.** Published from tag `v0.1.0`; the runtime is
@@ -36,8 +42,10 @@ preparation is broken upstream. Use npm.
 The package and its durable state are described in
 [Upgrade](upgrade.md), [Package rollback](rollback.md), and
 [Backup and restore](backup-restore.md). Keep a state backup before upgrading.
-This is the first public stable version; there is no earlier public package to
-downgrade to, so package rollback is not yet rehearsable.
+This is the first public stable version. The public prereleases remain
+installable (`0.1.0-rc.3` has the same runtime), so a package-only rollback can
+pin an exact prerelease; a live package-downgrade rehearsal has not been
+recorded.
 
 ## Verification
 
@@ -54,7 +62,8 @@ downgrade to, so package rollback is not yet rehearsable.
 - Git-spec installs fail upstream in OpenCode 2.2.7.
 - Herdr prefix control is inconclusive host evidence; automatic copy-on-release
   follows the host's Ghostty setting.
-- There is no earlier public version, so a package downgrade is not rehearsed.
+- The public prereleases remain installable; a live package-downgrade rehearsal
+  from stable `0.1.0` has not been recorded.
 - This is a 0.x release: minor versions may still change APIs.
 - No telemetry. Diagnostics are local and must be redacted before sharing.
 

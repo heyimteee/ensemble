@@ -27,6 +27,15 @@ tools, providers, permissions, and skills.
   Ensemble warns if the session is busy or needs a directory move. When a move
   is needed, the binding updates only after the host confirms it.
 
+
+<DocsFigure
+  src="/media/native-session.png"
+  alt="Ada's native OpenCode session opened from a work item, showing the user request, the rendered Acme Notes release note, and the Build footer."
+  caption="The native session is where the agent runs. Press o to open the assignee's session; press F2 to return to Ensemble."
+  width="1400"
+  height="800"
+/>
+
 ## Mental model
 
 Each agent has exactly one current native session per conversation:

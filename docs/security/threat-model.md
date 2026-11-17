@@ -1,3 +1,9 @@
+---
+title: Ensemble threat model
+description: Storage, filesystem, tools, cross-workspace access, skills, approvals, and logs.
+version: 0.1.x
+---
+
 # Ensemble threat model
 
 - **Status:** Accepted for the 0.1 release candidate

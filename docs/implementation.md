@@ -210,6 +210,7 @@ The native tool surface keeps only decisions the server cannot infer safely:
 
 - `ensemble_task_status`
 - `ensemble_review`
+- `ensemble_dispatch`
 - `ensemble_ask_person`
 - `ensemble_remember`
 - `ensemble_share`
@@ -243,11 +244,12 @@ switch. Both lists are registered per host location and are replaced in place
 when the setting changes.
 
 Operators change the mode with `:native-first on|off|shadow` and the tool
-surface with `:tools native|legacy`. `:native-first on` also clears a legacy
-tool-surface override so the native list returns. Both commands update settings
-through the normal validated path and refresh the location registrations
-immediately. The service logs one `native.mode` event at start with the
-effective mode, tool surface, and whether the default was migrated; it carries
+surface with `:tools native|legacy`. `:native-first on` sets the mode only and
+does not clear an explicit `toolSurface: "legacy"` override; `:tools native` is
+the separate restore. Both commands update settings through the normal
+validated path and refresh the location registrations immediately. The service
+logs one `native.mode` event at start with the effective mode, tool surface,
+and whether the default was migrated; it carries
 no content or paths. The host must still be restarted once after upgrading so
 the new plugin code and the rewritten `AGENTS.md` contract load. Rollback never
 requires editing storage, and the legacy path stays available for the release
@@ -904,4 +906,4 @@ never committed. They must not be attached to public issues without review.
 - Real mouse-drag copy remains manual because tmux does not reliably inject drag gestures; the pane-bound selection/copy policy is unit-covered.
 - The host keeps old plugin pages mounted; the route gate prevents stale key ownership but cannot force the host to dispose them.
 - The large TUI application component remains a follow-up.
-- The package is `@heyimteee/ensemble` under the MIT license; the built `0.1.0-rc.2` candidate passes the isolated install check and is not a published release yet.
+- The package is `@heyimteee/ensemble` under the MIT license. Stable `0.1.0` is published on npm `latest`; `0.1.0-rc.3` remains on `next`.

@@ -1,3 +1,9 @@
+---
+title: Documentation redirect map
+description: Where entries from the old documentation index moved.
+version: 0.1.x
+---
+
 # Documentation redirect map
 
 The `0.1.x` docs reorganized the old single index into user sections and a
@@ -8,6 +14,27 @@ listed and reached from navigation.
 Use this map when following an old bookmark, an old section anchor, or a link
 from a historical record. `npm run docs:check` keeps the section indexes, the
 style guide, and this map reachable from the [docs home](README.md).
+
+## Site redirects
+
+The published site uses clean URLs under `/ensemble/` and rewrites each section
+`README.md` to its directory URL. GitHub Pages cannot read `_redirects`, so the
+site build emits meta-refresh pages for the old URL forms. The generated map
+covers:
+
+- the old docs home (`/docs/`, `/docs/README.html`, `/docs.html`) to `/`;
+- section README and `.md`/`.html` forms such as
+  `/getting-started/README.html` to `/getting-started/`;
+- the old docs home alias `/docs/` to `/`.
+
+Section landing pages are served from their directory routes
+(`/getting-started/`, `/reference/`). A separate `.html` alias is not emitted
+because it would shadow the real directory index on some static servers.
+
+The site build fails when a redirect target is not a built page or a redirect
+would overwrite a real page. See
+[`docs-site-check`](../scripts/docs-site-check.mjs) and
+[`docs-site-artifacts`](../scripts/docs-site-artifacts.mjs).
 
 ## Section redirects
 
@@ -32,7 +59,7 @@ style guide, and this map reachable from the [docs home](README.md).
 | v2 product specification (#17) | External issue link; see [Contributing](contributing/README.md) for workflow |
 | v2 implementation tickets (#18–#29) | External issue links; see [Contributing](contributing/README.md) for workflow |
 | Historical v1 specification (#1) | External issue link; historical only |
-| OpenCode host support range (`docs/compatibility/opencode-host-range.md`) | [Reference: supported hosts](reference/README.md#current-reference-sources); evidence in [the evidence index](contributing/evidence.md#compatibility-evidence) |
+| OpenCode host support range (`docs/compatibility/opencode-host-range.md`) | [Reference: supported hosts](reference/supported.md); evidence in [the evidence index](contributing/evidence.md#compatibility-evidence) |
 | OpenCode 2.2.1 compatibility report (`docs/compatibility/opencode-2.2.1.md`) | [Reference: historical compatibility](reference/README.md#historical-compatibility); evidence in [the evidence index](contributing/evidence.md#compatibility-evidence) |
 
 ## Working-agreement entries

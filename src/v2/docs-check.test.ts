@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -13,8 +13,15 @@ const COPIED_PATHS = [
   "package.json",
   "README.md",
   "LICENSE",
+  "AGENTS.md",
+  "GLOSSARY.md",
+  "SECURITY.md",
+  "CONTRIBUTING.md",
+  "CHANGELOG.md",
   "scripts/README.md",
   "docs",
+  "src",
+  "scripts",
   ".github/ISSUE_TEMPLATE",
   ".github/PULL_REQUEST_TEMPLATE.md",
   ".github/workflows/verify.yml",
@@ -54,10 +61,12 @@ function append(root: string, path: string, text: string): void {
   writeFileSync(join(root, path), `${read(root, path)}${text}`)
 }
 
-function run(root: string) {
-  return spawnSync(process.execPath, ["--experimental-strip-types", script, "--root", root], {
-    encoding: "utf8",
-  })
+function run(root: string, extraArgs: readonly string[] = []) {
+  return spawnSync(
+    process.execPath,
+    ["--experimental-strip-types", script, "--root", root, "--skip-site-build", ...extraArgs],
+    { encoding: "utf8" },
+  )
 }
 
 test("docs-check accepts the current docs and canonical versions", () => {
@@ -228,7 +237,7 @@ test("docs-check accepts a current verification record linked from the evidence 
     append(
       root,
       "docs/contributing/evidence.md",
-      "\n- [Linked record](verification/2026-11-13-linked.md)\n",
+      "\n- [Linked record](../verification/2026-11-13-linked.md)\n",
     )
     const result = run(root)
     assert.equal(result.status, 0, result.stderr)
@@ -319,4 +328,195 @@ test("docs-check rejects a template without the redaction warning", () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test("docs-check fast mode explicitly skips the VitePress build", () => {
+  const root = fixtureRepo()
+  try {
+    const result = run(root)
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /site build: skipped \(--skip-site-build\)/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check reports a missing required page as a validation error, not an internal error", () => {
+  const root = fixtureRepo()
+  try {
+    rmSync(join(root, "docs/getting-started/quickstart.md"))
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /docs\/getting-started\/quickstart\.md: required page is missing/)
+    assert.doesNotMatch(result.stderr, /ENOENT|at .*docs-check\.mjs/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a broken internal link", () => {
+  const root = fixtureRepo()
+  try {
+    append(root, "docs/concepts/README.md", "\n[Missing](missing-page.md)\n")
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /docs\/concepts\/README\.md.*missing-page\.md/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects an unknown internal anchor", () => {
+  const root = fixtureRepo()
+  try {
+    append(root, "docs/getting-started/quickstart.md", "\n[Missing anchor](install.md#no-such-section)\n")
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /quickstart\.md.*install\.md#no-such-section/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check accepts the VitePress ids for numeric, punctuation, emoji, and duplicate headings", () => {
+  const root = fixtureRepo()
+  try {
+    append(
+      root,
+      "docs/getting-started/quickstart.md",
+      [
+        "",
+        "## 2.2.7 rendered fixture",
+        "",
+        "[Numeric](quickstart.md#_2-2-7-rendered-fixture)",
+        "",
+        "## Release — 0.1.0-rc.2 (rendered fixture)",
+        "",
+        "[Punctuation](quickstart.md#release-—-0-1-0-rc-2-rendered-fixture)",
+        "",
+        "## 🚀 Rendered launch",
+        "",
+        "[Emoji](quickstart.md#🚀-rendered-launch)",
+        "",
+        "## Rendered setup",
+        "",
+        "## Rendered setup",
+        "",
+        "[Duplicate](quickstart.md#rendered-setup-1)",
+        "",
+      ].join("\n"),
+    )
+    const result = run(root)
+    assert.equal(result.status, 0, result.stderr)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check does not weaken the rendered anchor contract to GitHub slugs", () => {
+  const root = fixtureRepo()
+  try {
+    append(
+      root,
+      "docs/getting-started/quickstart.md",
+      "\n## 2.2.8 rendered fixture\n\n[GitHub slug](quickstart.md#228-rendered-fixture)\n",
+    )
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /broken anchor #228-rendered-fixture/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check does not accept a verification filename mentioned only in prose", () => {
+  const root = fixtureRepo()
+  try {
+    write(root, "docs/verification/2026-11-13-prose-only.md", "# Prose only\n")
+    append(root, "docs/contributing/evidence.md", "\nThe record 2026-11-13-prose-only.md is not a link.\n")
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /2026-11-13-prose-only\.md/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check requires frontmatter metadata on every user-facing page", () => {
+  const root = fixtureRepo()
+  try {
+    replace(
+      root,
+      "docs/getting-started/quickstart.md",
+      "---\ntitle: Quickstart\ndescription: Go from a fresh install to a first group reply and a finished work item, with expected output at each step.\nversion: 0.1.x\n---\n\n",
+      "",
+    )
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /quickstart\.md.*frontmatter/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a frontmatter version scope outside the stable line", () => {
+  const root = fixtureRepo()
+  try {
+    replace(root, "docs/getting-started/quickstart.md", "version: 0.1.x", "version: 0.2.x")
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /quickstart\.md.*version/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects an unclosed code fence", () => {
+  const root = fixtureRepo()
+  try {
+    append(root, "docs/getting-started/quickstart.md", "\n```sh\nnpm run verify\n")
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /quickstart\.md.*unclosed code fence/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects invalid shell syntax in a documented command", () => {
+  const root = fixtureRepo()
+  try {
+    append(root, "docs/getting-started/quickstart.md", "\n```sh\nif true; then\n```\n")
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /quickstart\.md.*shell syntax/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a user page that is absent from its section inventory", () => {
+  const root = fixtureRepo()
+  try {
+    write(
+      root,
+      "docs/concepts/orphan-page.md",
+      "---\ntitle: Orphan page\ndescription: A page with no navigation entry.\nversion: 0.1.x\n---\n\n# Orphan page\n\nNo section index links here.\n",
+    )
+    const result = run(root)
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /orphan-page\.md.*not reachable/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("package exposes the full, fast, and Markdown-lint documentation gates", () => {
+  const pkg = JSON.parse(read(repoRoot, "package.json"))
+  assert.match(pkg.scripts["docs:check"], /scripts\/docs-check\.mjs\s*$/)
+  assert.match(pkg.scripts["docs:check:fast"], /docs-check\.mjs --fast$/)
+  assert.match(pkg.scripts["docs:check:fast"], /npm run docs:lint/)
+  assert.match(pkg.scripts["docs:lint"], /markdownlint-cli2/)
+  assert.match(pkg.scripts["docs:site:build"], /docs-site-anchors\.mjs/)
+  assert.ok(existsSync(join(repoRoot, ".markdownlint-cli2.jsonc")))
 })

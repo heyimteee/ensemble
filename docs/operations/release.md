@@ -1,3 +1,9 @@
+---
+title: Release operations
+description: Run the tag-driven release workflow, required checks, dry run, and post-release steps.
+version: 0.1.x
+---
+
 # Release operations
 
 Ticket #275. A version tag is the only path that publishes Ensemble. This page
@@ -7,28 +13,32 @@ boundary, and the dry-run rehearsal. Use
 
 ## Current release
 
-`@heyimteee/ensemble@0.1.0-rc.2` is published as a GitHub prerelease at tag
-`v0.1.0-rc.2` (release commit `ccd13eb`) and on npm. npm dist-tags are
-`latest: 0.1.0-rc.2` and `next: 0.1.0-rc.2`; npm requires `latest` and rejects
-deleting it (E400), so both point at the RC while it is the only version. Pin
-the exact version for deliberate installs.
+`@heyimteee/ensemble@0.1.0` is the stable release, published from tag `v0.1.0`
+and marked as a normal GitHub release, not a prerelease. npm dist-tags are
+`latest: 0.1.0` and `next: 0.1.0-rc.3`. The runtime is identical to
+`0.1.0-rc.3`; the stable promotion moves `latest` and release metadata. Pin the
+exact version for deliberate installs.
 
-The release-candidate verification tag `rc-0.1.0-rc.2` at `d74fc3d` predates
-the #281–#284 fixes; it is an evidence base, not a publish source, and must not
-be moved. #285 changes the CI workflows and contract checker; #286 adds
-OpenCode 2.3.0 support; #287 hardens live TUI readiness with no product runtime
-change. Required CI at `a7f1eb3` is green on the first attempt: Verify,
-Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0), Docs, and Node Matrix. Both
-4-hour soaks, the full macOS checklist including 1.7, and the public-registry
-install smoke on 2.2.7/2.3.0 pass. See the
+The historical `0.1.0-rc.2` release remains at tag `v0.1.0-rc.2` (release commit
+`ccd13eb`) as the first public prerelease. The release-candidate verification
+tag `rc-0.1.0-rc.2` at `d74fc3d` predates the #281–#284 fixes; it is an evidence
+base, not a publish source, and must not be moved. #285 changes the CI workflows
+and contract checker; #286 adds OpenCode 2.3.0 support; #287 hardens live TUI
+readiness with no product runtime change. Required CI at `a7f1eb3` is green on
+the first attempt: Verify, Compatibility (OpenCode 2.2.6, 2.2.7, and 2.3.0),
+Docs, and Node Matrix. Both 4-hour soaks, the full macOS checklist including
+1.7, and the public-registry install smoke on 2.2.7/2.3.0 pass. See the
 [parent #268 record](../verification/2026-11-17-ticket-268.md#public-registry-smoke)
 and the [soak record](../verification/2026-11-17-soak.md). If any runtime
 source changes, rerun the clean-install proof before a future tag.
 
-See the [release notes](release-notes-0.1.0-rc.2.md), [launch
-plan](launch-plan-0.1.0-rc.2.md), [release
-sign-off](release-signoff.md#release-sign-off--010-rc2-released-2026-11-17),
-and [parent #268 verification](../verification/2026-11-17-ticket-268.md).
+The stable release notes are [Ensemble 0.1.0](release-notes-0.1.0.md); the
+historical prerelease notes and launch plan remain
+[rc.2](release-notes-0.1.0-rc.2.md) and [rc.2 launch
+plan](launch-plan-0.1.0-rc.2.md). The [release
+sign-off](release-signoff.md#release-sign-off--010-rc2-released-2026-11-17)
+and [parent #268 verification](../verification/2026-11-17-ticket-268.md) are
+the prerelease evidence.
 
 ## Required checks and main protection
 
@@ -78,6 +88,13 @@ rename a workflow job or change the Node/OpenCode matrix without updating
 `REQUIRED_STATUS_CHECKS` and this list; a required context that no workflow
 produces blocks every pull request indefinitely.
 
+The `docs-rationale` workflow is in the repository but is not one of the
+contexts above and is not yet required on `main`. Making it required needs an
+explicit maintainer decision and a GitHub ruleset change, which this repository
+does not apply automatically. Until then it reports on the pull request as an
+advisory check; a program merge can proceed without claiming external
+enforcement.
+
 ## Release workflow
 
 `.github/workflows/release.yml` has two triggers:
@@ -93,7 +110,7 @@ A plain branch push or a pull request cannot reach the publish jobs.
 | `release-preflight` | Validates the tag against `package.json`, extracts the changelog section into `RELEASE_NOTES.md`, exports `version`, `tag`, `dry-run`, and `dist-tag` | Always |
 | `package` | `npm ci`, `npm run verify`, `npm run docs:check`, `npm run build`, `npm pack`, CycloneDX SBOM, artifact upload | Always |
 | `publish-dry-run` | `npm publish --dry-run --access public --tag "$DIST_TAG"` with no registry secret | Dry run only |
-| `publish` | `npm publish --provenance --access public --tag "$DIST_TAG"` with `id-token: write` and the `NPM_TOKEN` secret | Tag push only |
+| `publish` | `npm publish --provenance --access public --tag "$DIST_TAG"` with `id-token: write` (npm trusted publishing; no long-lived token) | Tag push only |
 | `github-release` | Creates the GitHub release from the changelog notes and attaches the SBOM, tarball, notes, and changelog | Tag push only |
 
 The default workflow permission is `contents: read`. Only the publish job adds
@@ -103,20 +120,20 @@ absolute path.
 
 ### Credential setup
 
-- `NPM_TOKEN` is a repository secret: an npm granular automation token with
-  publish rights for the `@heyimteee` scope. It is exposed only to the publish
-  step, never to the dry-run job.
+- npm publishing uses trusted publishing (OIDC): the workflow grants
+  `id-token: write` only to the publish job, and npm accepts the signed GitHub
+  identity. There is no `NPM_TOKEN` repository secret to create, rotate, or
+  leak.
 - Provenance needs `id-token: write` and a public package. The workflow runs
   `npm publish --provenance --access public`; npm signs the artifact through
   GitHub's OIDC provider.
 - npm refuses a prerelease without an explicit dist-tag. The preflight exports
   `next` for a version with a prerelease suffix and `latest` for a final
   release, and both publish jobs pass `--tag "$DIST_TAG"`. npm also requires a
-  `latest` tag and rejects deleting it (E400), so on a first/only publish
-  `latest` necessarily points at the prerelease even when `--tag next` is used.
-  Pin exact versions; a later stable release moves `latest`.
-- Rotate or revoke the token after a release if the credential may have been
-  exposed. Never put a token in a workflow file, tag message, or issue.
+  `latest` tag and rejects deleting it (E400). Stable `0.1.0` owns `latest`;
+  `0.1.0-rc.3` remains on `next`. Pin exact versions.
+- Never put a registry credential, token, tag message, or private path in a
+  workflow file or issue.
 
 ### Dry run
 
@@ -148,8 +165,8 @@ missing export fails before any upload.
 ### Tagged release
 
 1. Approve the release and its notes, launch plan, and sign-off (#278). The
-   current published prerelease is `0.1.0-rc.2`; bump the version only if a
-   future artifact or version decision changes.
+   current published release is stable `0.1.0`; a later release bumps the patch
+   version and records its own notes. Do not move the `v0.1.0` tag.
 2. Confirm `version` in `package.json` and `package-lock.json` agree; open the
    release pull request and let every required check pass.
 3. Merge to `main`, then tag the merge commit:

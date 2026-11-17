@@ -12,11 +12,12 @@
  * current records live in docs/contributing/evidence.md, not the docs home.
  *
  * Usage:
- *   node --experimental-strip-types scripts/docs-check.mjs [--root DIR]
+ *   node --experimental-strip-types scripts/docs-check.mjs [--root DIR] [--skip-site-build]
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
+import { dirname, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { spawnSync } from "node:child_process"
 import { ENSEMBLE_BLOCK_VERSION } from "../src/v2/init-block.ts"
 import { workflowValue } from "../src/v2/ci-workflows.ts"
 import {
@@ -24,6 +25,17 @@ import {
   SUPPORTED_OPENCODE_VERSIONS,
 } from "../src/v2/host-compatibility.ts"
 import { MINIMUM_NODE_VERSION } from "../src/v2/node-version.ts"
+import { checkReferenceDocs } from "./reference-check.mjs"
+import { checkDocsMedia } from "./docs-media-check.mjs"
+import {
+  extractLinks,
+  fencedBlocks,
+  parseFrontmatter,
+  shellSyntaxFailures,
+} from "./lib/docs-quality.ts"
+import { createRenderedAnchorResolver } from "./lib/rendered-anchors.mjs"
+import { checkBuiltSiteAnchors } from "./lib/site-anchors.mjs"
+import { BASE, OUT_DIR } from "../docs/.vitepress/site-data.mjs"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -31,13 +43,15 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const CURRENT_RECORD_FLOOR = "2026-11-11"
 
 function parseArgs(argv) {
-  const args = { root: REPO_ROOT, help: false }
+  const args = { root: REPO_ROOT, help: false, skipSiteBuild: false }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === "--root") {
       const value = argv[++index]
       if (!value || value.startsWith("--")) throw new Error("--root needs a value")
       args.root = resolve(value)
+    } else if (arg === "--skip-site-build" || arg === "--fast") {
+      args.skipSiteBuild = true
     } else if (arg === "--help" || arg === "-h") {
       args.help = true
     } else {
@@ -147,11 +161,20 @@ function checkVerificationIndex(root, failures) {
     failures.push("docs/verification: directory is missing")
     return
   }
+  // A filename in prose or a code span is not a navigation path. Only an
+  // actual Markdown/HTML link to the record satisfies the evidence contract.
+  const linked = new Set()
+  for (const link of extractLinks(index)) {
+    if (isExternalLink(link.href)) continue
+    const target = resolveMarkdownTarget(root, EVIDENCE_INDEX, link.href)
+    if (!target.file) continue
+    linked.add(slash(relative(root, target.file)))
+  }
   for (const name of readdirSync(directory).sort()) {
     if (!name.endsWith(".md")) continue
     const date = name.slice(0, 10)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < CURRENT_RECORD_FLOOR) continue
-    if (!index.includes(name)) {
+    if (!linked.has(`docs/verification/${name}`)) {
       failures.push(`${EVIDENCE_INDEX}: current verification record ${name} is not linked`)
     }
   }
@@ -254,7 +277,338 @@ function checkSupport(root, failures) {
   }
 }
 
-function checkDocs(root = REPO_ROOT) {
+const USER_SECTIONS = [
+  "getting-started",
+  "concepts",
+  "guides",
+  "reference",
+  "operations",
+  "security",
+  "privacy",
+  "support",
+]
+
+const USER_ROOT_PAGES = [
+  "docs/README.md",
+  "docs/style-guide.md",
+  "docs/redirects.md",
+  "docs/contributing/README.md",
+  "docs/contributing/evidence.md",
+]
+
+const REQUIRED_PAGES = [
+  ...new Set([
+    ...SECTION_INDEXES,
+    ...USER_ROOT_PAGES,
+    "docs/getting-started/quickstart.md",
+    "docs/getting-started/install.md",
+    "docs/reference/tools.md",
+    "docs/reference/commands.md",
+    "docs/support/troubleshooting.md",
+  ]),
+]
+
+/** Historical release pages carry their own applicable version. */
+const HISTORICAL_VERSIONS = new Map([
+  ["docs/operations/release-notes-0.1.0.md", "0.1.0"],
+  ["docs/operations/release-notes-0.1.0-rc.2.md", "0.1.0-rc.2"],
+  ["docs/operations/launch-plan-0.1.0-rc.2.md", "0.1.0-rc.2"],
+  ["docs/operations/release-signoff.md", "0.1.0-rc.2"],
+])
+
+const CURRENT_VERSION_DOCS = [
+  "README.md",
+  "docs/README.md",
+  "docs/style-guide.md",
+  "docs/getting-started/README.md",
+  "docs/getting-started/install.md",
+  "docs/getting-started/quickstart.md",
+  "docs/getting-started/first-team.md",
+  "docs/getting-started/upgrade.md",
+  "docs/getting-started/what-is-ensemble.md",
+]
+
+function slash(path) {
+  return path.replace(/\\/g, "/")
+}
+
+function walkMarkdown(root, directory = join(root, "docs")) {
+  const pages = []
+  if (!existsSync(directory)) return pages
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue
+    const full = join(directory, entry.name)
+    if (entry.isDirectory()) pages.push(...walkMarkdown(root, full))
+    else if (entry.isFile() && entry.name.endsWith(".md")) pages.push(slash(relative(root, full)))
+  }
+  return pages.sort()
+}
+
+function isUserPage(path) {
+  const docPath = path.replace(/^docs\//, "")
+  return (
+    USER_ROOT_PAGES.includes(path) ||
+    USER_SECTIONS.some(
+      (section) => docPath === `${section}/README.md` || docPath.startsWith(`${section}/`),
+    )
+  )
+}
+
+function isExternalLink(href) {
+  return /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(href)
+}
+
+function decodePath(value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function insideRoot(root, target) {
+  const rel = relative(root, target)
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`))
+}
+
+function resolveMarkdownTarget(root, fromPath, rawHref) {
+  const hashAt = rawHref.indexOf("#")
+  const hash = hashAt >= 0 ? rawHref.slice(hashAt + 1) : ""
+  const pathAndQuery = hashAt >= 0 ? rawHref.slice(0, hashAt) : rawHref
+  const queryAt = pathAndQuery.indexOf("?")
+  const rawPath = queryAt >= 0 ? pathAndQuery.slice(0, queryAt) : pathAndQuery
+  if (!rawPath) {
+    return { file: join(root, fromPath), hash }
+  }
+  const path = decodePath(rawPath)
+  let target
+  if (path.startsWith("/")) {
+    const clean = path.replace(/^\/+/, "")
+    if (clean.startsWith("media/")) {
+      target = join(root, "docs", "public", clean)
+    } else if (["favicon.svg", "og-image.png", "robots.txt", ".nojekyll"].includes(clean)) {
+      target = join(root, "docs", "public", clean)
+    } else {
+      target = join(root, "docs", clean)
+    }
+  } else {
+    target = resolve(dirname(join(root, fromPath)), path)
+  }
+  if (!insideRoot(root, target)) {
+    return { error: "link leaves the repository" }
+  }
+  let file = target
+  if (existsSync(target) && statSync(target).isDirectory()) {
+    file = join(target, "README.md")
+  } else if (!existsSync(target) && existsSync(`${target}.md`)) {
+    file = `${target}.md`
+  }
+  if (!existsSync(file) || statSync(file).isDirectory()) {
+    return { error: `target ${slash(relative(root, target))} is missing` }
+  }
+  return { file, hash }
+}
+
+function sectionOf(path) {
+  const match = /^docs\/([^/]+)\//.exec(path)
+  return match?.[1]
+}
+
+function checkPageInventory(root, failures) {
+  for (const path of REQUIRED_PAGES) {
+    if (!existsSync(join(root, path))) {
+      failures.push(`${path}: required page is missing`)
+    }
+  }
+
+  const allPages = walkMarkdown(root)
+  for (const section of USER_SECTIONS) {
+    const index = `docs/${section}/README.md`
+    if (!existsSync(join(root, index))) continue
+    const pages = allPages.filter((path) => sectionOf(path) === section)
+    const reachable = new Set([index])
+    const queue = [index]
+    while (queue.length > 0) {
+      const page = queue.shift()
+      const text = read(root, page, failures)
+      if (!text) continue
+      for (const link of extractLinks(text)) {
+        if (isExternalLink(link.href) || link.href.startsWith("#")) continue
+        const target = resolveMarkdownTarget(root, page, link.href)
+        if (!target.file || !target.file.endsWith(".md")) continue
+        const targetPath = slash(relative(root, target.file))
+        if (sectionOf(targetPath) !== section || reachable.has(targetPath)) continue
+        reachable.add(targetPath)
+        queue.push(targetPath)
+      }
+    }
+    for (const page of pages) {
+      if (!reachable.has(page)) {
+        failures.push(`${page}: user page is not reachable from ${index} (page inventory)`)
+      }
+    }
+  }
+}
+
+function checkFrontmatter(root, failures) {
+  for (const path of walkMarkdown(root)) {
+    if (!isUserPage(path)) continue
+    const text = read(root, path, failures)
+    if (!text) continue
+    const parsed = parseFrontmatter(text)
+    if (!parsed.hasFrontmatter) {
+      failures.push(`${path}: user page needs frontmatter with title, description, and version`)
+      continue
+    }
+    if (!parsed.values.title) failures.push(`${path}: frontmatter is missing title`)
+    if (!parsed.values.description || parsed.values.description.length < 10) {
+      failures.push(`${path}: frontmatter needs a useful description`)
+    }
+    const version = parsed.values.version ?? ""
+    const expected = HISTORICAL_VERSIONS.get(path) ?? "0.1.x"
+    if (version !== expected) {
+      failures.push(
+        `${path}: frontmatter version ${JSON.stringify(version)} must be ${JSON.stringify(expected)}`,
+      )
+    }
+    if (parsed.values.title) {
+      const h1 = /^#\s+(.+?)\s*$/m.exec(parsed.body)
+      if (!h1) {
+        failures.push(`${path}: frontmatter page needs exactly one H1 matching the title`)
+      } else if (h1[1] !== parsed.values.title) {
+        failures.push(
+          `${path}: H1 ${JSON.stringify(h1[1])} must match frontmatter title ${JSON.stringify(parsed.values.title)}`,
+        )
+      }
+    }
+  }
+}
+
+function checkMarkdownStructure(root, failures) {
+  const pages = [
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    "GLOSSARY.md",
+    "CHANGELOG.md",
+    ...walkMarkdown(root),
+  ]
+  for (const path of pages) {
+    if (!existsSync(join(root, path))) continue
+    const text = read(root, path, failures)
+    if (!text) continue
+    for (const block of fencedBlocks(text)) {
+      if (!block.closed) {
+        failures.push(`${path}: unclosed code fence starting at line ${block.startLine}`)
+      } else if (isUserPage(path) && !block.language) {
+        failures.push(`${path}: code fence at line ${block.startLine} needs a language`)
+      }
+    }
+    for (const failure of shellSyntaxFailures(text)) {
+      failures.push(`${path}: ${failure}`)
+    }
+  }
+}
+
+async function checkInternalLinks(root, failures) {
+  const pages = [
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    "GLOSSARY.md",
+    "CHANGELOG.md",
+    ...walkMarkdown(root),
+  ]
+  const anchorCache = new Map()
+  let renderedAnchors
+  try {
+    renderedAnchors = await createRenderedAnchorResolver(join(root, "docs"))
+  } catch (error) {
+    failures.push(
+      `docs-check: could not initialize the VitePress markdown renderer: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+    )
+    return
+  }
+  for (const path of pages) {
+    if (!existsSync(join(root, path))) continue
+    const text = read(root, path, failures)
+    if (!text) continue
+    for (const link of extractLinks(text)) {
+      if (isExternalLink(link.href)) continue
+      const target = resolveMarkdownTarget(root, path, link.href)
+      if (target.error) {
+        failures.push(`${path}:${link.line}: broken link ${JSON.stringify(link.href)} (${target.error})`)
+        continue
+      }
+      if (!target.hash || !target.file?.endsWith(".md")) continue
+      let anchors = anchorCache.get(target.file)
+      if (!anchors) {
+        anchors = renderedAnchors(readFileSync(target.file, "utf8"))
+        anchorCache.set(target.file, anchors)
+      }
+      const anchor = decodePath(target.hash)
+      if (!anchors.has(anchor)) {
+        failures.push(
+          `${path}:${link.line}: broken anchor #${anchor} in ${JSON.stringify(link.href)}`,
+        )
+      }
+    }
+  }
+}
+
+function checkCurrentPackageVersionClaims(root, packageName, packageVersion, failures) {
+  for (const path of CURRENT_VERSION_DOCS) {
+    const text = read(root, path, failures)
+    if (!text) continue
+    for (const match of text.matchAll(
+      new RegExp(`${packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}@(\\d[^\\s\`]*)`, "g"),
+    )) {
+      if (match[1] !== packageVersion) {
+        failures.push(`${path}: install version ${JSON.stringify(match[0])} must use ${packageVersion}`)
+      }
+    }
+  }
+  const siteData = read(root, "docs/.vitepress/site-data.mjs", failures)
+  if (siteData) {
+    const match = /export const VERSION = "([^"]+)"/.exec(siteData)
+    const expected = `${packageVersion.split(".").slice(0, 2).join(".")}.x`
+    if (!match || match[1] !== expected) {
+      failures.push(
+        `docs/.vitepress/site-data.mjs: VERSION ${JSON.stringify(match?.[1] ?? "")} must be ${expected}`,
+      )
+    }
+  }
+}
+
+function runSiteBuild(root, failures) {
+  const result = spawnSync("npm", ["run", "docs:site:build"], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 10 * 60 * 1000,
+    maxBuffer: 10 * 1024 * 1024,
+    env: { ...process.env, ENSEMBLE_DOCS_SITE_ANCHOR_CHECK: "0" },
+  })
+  if (result.error) {
+    failures.push(`docs:site:build could not run: ${result.error.message}`)
+    return false
+  }
+  if (result.status !== 0) {
+    const output = `${result.stderr ?? ""}\n${result.stdout ?? ""}`
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-12)
+      .join(" | ")
+    failures.push(`docs:site:build failed: ${output || `exit ${result.status}`}`)
+    return false
+  }
+  return true
+}
+
+async function checkDocs(root = REPO_ROOT, { skipSiteBuild = false } = {}) {
   const failures = []
   const version = ENSEMBLE_BLOCK_VERSION
   const hosts = [...SUPPORTED_OPENCODE_VERSIONS]
@@ -378,6 +732,10 @@ function checkDocs(root = REPO_ROOT) {
         failures.push("package.json: name is missing")
       } else {
         requireClaims("README.md", readme, [`opencode plugin add ${pkg.name}`], failures)
+        if (typeof pkg.version === "string" && pkg.version.length > 0) {
+          requireClaims("README.md", readme, [`opencode plugin add ${pkg.name}@${pkg.version}`], failures)
+          checkCurrentPackageVersionClaims(root, pkg.name, pkg.version, failures)
+        }
       }
     }
   }
@@ -401,32 +759,73 @@ function checkDocs(root = REPO_ROOT) {
   }
 
   checkDocsNavigation(root, failures)
+  checkPageInventory(root, failures)
+  checkFrontmatter(root, failures)
+  checkMarkdownStructure(root, failures)
+  await checkInternalLinks(root, failures)
   checkVerificationIndex(root, failures)
   checkSupport(root, failures)
+  for (const failure of checkReferenceDocs(root)) {
+    failures.push(`reference:check: ${failure}`)
+  }
+  for (const failure of checkDocsMedia(root)) {
+    failures.push(`media: ${failure}`)
+  }
 
-  return { failures, version, hosts, liveNode }
+  let siteBuild = "skipped"
+  let builtAnchors
+  if (skipSiteBuild) {
+    siteBuild = "skipped (--skip-site-build)"
+  } else if (root !== REPO_ROOT) {
+    siteBuild = "skipped (fixture root)"
+  } else {
+    const built = runSiteBuild(root, failures)
+    siteBuild = built ? "ok" : "failed"
+    if (built) {
+      // The renderer and this crawler are independent checks: the renderer
+      // catches source-level drift before a build, and the built HTML is the
+      // final user-visible anchor contract.
+      builtAnchors = checkBuiltSiteAnchors(join(root, "docs", ".vitepress", "dist"), { base: BASE })
+      for (const failure of builtAnchors.failures) {
+        failures.push(`built site: ${failure}`)
+      }
+    }
+  }
+
+  return { failures, version, hosts, liveNode, siteBuild, builtAnchors }
 }
 
 const help = process.argv.includes("--help") || process.argv.includes("-h")
 if (help) {
-  console.log(`Usage: node --experimental-strip-types scripts/docs-check.mjs [--root DIR]
+  console.log(`Usage: node --experimental-strip-types scripts/docs-check.mjs [--root DIR] [--fast]
 
 Asserts that the current docs match the canonical contract, host, and Node
-versions, that the user navigation exposes every docs section, and that every
-verification record from ${CURRENT_RECORD_FLOOR} onward is linked from
-${EVIDENCE_INDEX}. Exits 1 on any stale or missing claim.`)
+versions, that the page inventory and frontmatter are complete, that every
+internal link and VitePress-rendered anchor resolves, that Markdown fences and
+shell samples are valid, that every verification record from ${CURRENT_RECORD_FLOOR}
+onward is linked from ${EVIDENCE_INDEX}, and that the generated reference and
+media are current. The default runs the VitePress docs-site build, then crawls
+the built HTML anchors independently. --fast (or --skip-site-build) explicitly
+skips both site steps for the separate CI docs job and fixture tests.
+Exits 1 on any stale or missing claim.`)
 } else {
   try {
     const args = parseArgs(process.argv.slice(2))
-    const { failures, version, hosts, liveNode } = checkDocs(args.root)
+    const { failures, version, hosts, liveNode, siteBuild, builtAnchors } = await checkDocs(args.root, {
+      skipSiteBuild: args.skipSiteBuild,
+    })
     if (failures.length > 0) {
       for (const failure of failures) console.error(`docs:check: ${failure}`)
       console.error(`docs:check: ${failures.length} stale or missing claim(s)`)
       process.exitCode = 1
     } else {
+      const anchorSummary = builtAnchors
+        ? `; built anchors ${builtAnchors.anchors}/${builtAnchors.links} links`
+        : ""
       console.log(
         `docs:check: ok (contract v${version}; OpenCode ${hosts.join(", ")}; `
-          + `Node >=${MINIMUM_NODE_VERSION}; live Node ${liveNode || "unset"})`,
+          + `Node >=${MINIMUM_NODE_VERSION}; live Node ${liveNode || "unset"}; `
+          + `site build: ${siteBuild}${anchorSummary})`,
       )
     }
   } catch (error) {

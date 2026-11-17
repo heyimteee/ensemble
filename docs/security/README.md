@@ -1,3 +1,9 @@
+---
+title: Security
+description: Threat model, permission review, accepted risks, and private vulnerability reporting.
+version: 0.1.x
+---
+
 # Security
 
 How Ensemble separates user authority, agent work, and OpenCode's native

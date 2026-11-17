@@ -1,3 +1,9 @@
+---
+title: Ensemble documentation
+description: Install Ensemble, learn the mental model, complete tasks, and look up exact behavior.
+version: 0.1.x
+---
+
 # Ensemble documentation
 
 Ensemble is a persistent agent team inside OpenCode: one group chat, named
@@ -10,6 +16,21 @@ OpenCode **2.2.6**, **2.2.7**, and **2.3.0** on Linux/tmux, with Node 22.23.4
 or newer. Prerelease history lives in the [changelog](../CHANGELOG.md), not in a
 separate docs tree.
 
+## See it in motion
+
+<TerminalHero
+  src="/media/hero-terminal.cast"
+  poster="/media/workspace-shell.png"
+  poster-alt="The Ensemble three-pane workspace in the synthetic Acme Notes fixture: agents in the rail, a working Ada work item in Work, and a group message in chat."
+  caption="A scripted replay of the isolated synthetic fixture. The install command is illustrative; the workspace, message, work item, and native session were captured from the local host."
+  title="Ensemble terminal replay: install, launch, group message, work item, and native session"
+/>
+
+The replay covers the stable install command, `/ensemble`, a group message, the
+work item, and the native session underneath. Read the
+[quickstart](getting-started/quickstart.md) for the same path as copyable steps,
+or the [workspace shell](concepts/workspace-shell.md) for the pane model.
+
 ## Start here
 
 | I want to… | Start with |
@@ -19,6 +40,9 @@ separate docs tree.
 | Finish a task in the app | [Guides](guides/README.md) |
 | Look up a command, key, tool, or setting | [Reference](reference/README.md) |
 | Back up, upgrade, or recover an install | [Operations](operations/README.md) |
+| Fix an install, work, timeout, or model failure | [Troubleshooting](support/troubleshooting.md) |
+| Check install tags, platform limits, and diagnostics | [FAQ](support/faq.md) |
+| Find support, recovery, security, and privacy in one place | [Operations and support](support/operations.md) |
 | Assess security or privacy | [Security](security/README.md) or [Privacy](privacy/README.md) |
 | Get help or report a problem | [Support](support/README.md) |
 | Contribute code or documentation | [Contributing](contributing/README.md) |
@@ -100,7 +124,7 @@ separate docs tree.
 | [Operations](operations/README.md) | Backup, restore, upgrade, rollback, release operations, and diagnostics |
 | [Security](security/README.md) | Threat model, permission review, and accepted risks |
 | [Privacy](privacy/README.md) | Data classes, retention, export, and delete |
-| [Support](support/README.md) | Support policy, incident runbook, support matrix, and known limitations |
+| [Support](support/README.md) | Support policy, troubleshooting, FAQ, incident runbook, support matrix, and known limitations |
 | [Contributing](contributing/README.md) | Development workflow, docs process, ADRs, and verification evidence |
 
 Operations, security, privacy, and support are user-facing sections. ADRs,
@@ -119,6 +143,10 @@ navigation.
   canonical terms.
 - [Changelog](../CHANGELOG.md): stable and prerelease history.
 
-`npm run docs:check` validates the current contract, host, and Node claims,
-keeps every docs section reachable from this home, and requires every current
-verification record to be linked from the evidence index.
+`npm run docs:check` validates the page inventory and frontmatter, internal
+links and VitePress-rendered anchors, Markdown and shell fences, the current
+contract, host, and Node claims, generated-reference freshness, the docs site
+build, and the built-site anchor crawl. CI runs `npm run docs:check:fast` in the
+Docs job and the separate Docs site job owns the one PR build. The full gate
+also keeps every docs section reachable from this home and requires every
+current verification record to be linked from the evidence index.

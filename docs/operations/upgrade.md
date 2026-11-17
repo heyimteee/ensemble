@@ -1,18 +1,18 @@
-# Upgrade from the pre-release to the first release
+---
+title: Upgrade to stable 0.1.0
+description: Move a prerelease or checkout install to the stable 0.1.0 package and verify the workspace.
+version: 0.1.x
+---
 
-Ticket #273. This guide moves a workspace from the linked pre-release to the
-first public package release. It covers the native-first default, the AGENTS v7
-contract, the native-state refactor, and durable state. It assumes the package
-install path decided in #269/#270:
+# Upgrade to stable 0.1.0
 
-```sh
-opencode plugin add @heyimteee/ensemble@<version>
-```
+This guide moves an existing workspace to the stable `0.1.0` package. The
+runtime is identical to `0.1.0-rc.3`; the stable release only moves npm `latest`
+to `0.1.0`. The public prerelease history remains `0.1.0-rc.2` and
+`0.1.0-rc.3`.
 
-The first public release is the `0.1.0-rc.2` prerelease. A stable `0.1.0` is a
-future decision. Read the release notes (#278) for the exact version and any
-late changes. Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6,
-2.2.7, and 2.3.0.
+Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6, 2.2.7, and 2.3.0.
+Pin the exact package version rather than a floating tag.
 
 ## Before you upgrade
 
@@ -22,7 +22,8 @@ late changes. Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6,
    node --version
    opencode plugin list
    ```
-   Keep the local path or commit that is currently linked.
+   Keep the local path or the exact prerelease version that is currently
+   installed.
 2. Back up durable state:
    ```sh
    npm run backup -- export --out ./ensemble-backup.json "$PWD"
@@ -32,19 +33,26 @@ late changes. Node must be `>=22.23.4`; supported OpenCode hosts are 2.2.6,
    content; keep it private.
 3. Stop the OpenCode host. The plugin and its RPC surface are replaced on the
    next start; there is no in-place hot swap.
-4. If a Workspace has uncommitted `.ensemble/config.json` edits, decide whether
+4. If a workspace has uncommitted `.ensemble/config.json` edits, decide whether
    they belong in the backup before restoring anything later.
 
-## Install the release
+## Install stable 0.1.0
 
 ```sh
-opencode plugin add @heyimteee/ensemble@0.1.0-rc.2
+opencode plugin add @heyimteee/ensemble@0.1.0
 opencode plugin list
 ```
 
-The old local entry is replaced by the package entry. Pin the exact version;
-`opencode plugin check` reports updates and `opencode plugin update` applies
-them deliberately. A restart is required after an update.
+Expected entry:
+
+```text
+ensemble.v2  0.1.0  @heyimteee/ensemble@0.1.0
+```
+
+The package entry replaces a linked checkout or older plugin entry. A restart
+is required after the install. `opencode plugin check` reports updates and
+`opencode plugin update` applies them deliberately; do not use a floating tag
+in a shared instruction.
 
 ## What happens on the first start
 
@@ -77,7 +85,9 @@ for disabling or limiting it are in
    npm run doctor -- "$PWD"
    ```
    Zero mismatches means storage, bindings, and `.ensemble/config.json` agree.
-3. Send one group message and confirm one turn, one Work card, and one final
+   A package-only install has no `npm` scripts; use `/ensemble` and the in-app
+   `:logs` viewer instead.
+3. Send one group message and confirm one turn, one work item, and one final
    row. Confirm `$Name` routing behaves as documented.
 4. Confirm the AGENTS block is v7 and that project content outside the markers
    is intact.
@@ -91,3 +101,18 @@ for disabling or limiting it are in
   automatic slot, or `backup.restore` with the pre-upgrade file.
 - A failed restore is expected to leave the previous state running; see the
   recovery codes in [backup and restore](backup-restore.md#failure-and-rollback).
+
+## Historical prerelease installs
+
+These commands remain valid only when you deliberately need the prerelease
+history. `0.1.0-rc.2` was the first public prerelease; `0.1.0-rc.3` is the
+latest prerelease and stays on npm `next`.
+
+```sh
+opencode plugin add @heyimteee/ensemble@0.1.0-rc.2
+opencode plugin add @heyimteee/ensemble@0.1.0-rc.3
+```
+
+The [0.1.0 release notes](release-notes-0.1.0.md) record the stable promotion;
+the [rc.2 release notes](release-notes-0.1.0-rc.2.md) remain the historical
+prerelease record.

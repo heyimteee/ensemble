@@ -53,6 +53,7 @@
     "latency:budget": "node --experimental-strip-types scripts/latency-budget.mjs",
     "test:live:sizes": "bash scripts/live-size-matrix.sh",
     "test:live:lifecycle": "bash scripts/live-lifecycle-fake.sh",
+    "test:live:quickstart": "bash scripts/live-quickstart.sh",
     "test:live:subagent": "bash scripts/live-subagent-probe.sh",
     "test:live:probe": "bash scripts/live-host-probe.sh",
     "test:live:native-first": "bash scripts/live-native-first.sh",
@@ -66,7 +67,18 @@
     "support:bundle": "node --experimental-strip-types scripts/support-bundle.mjs",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
     "logs:summary": "node scripts/log-summary.mjs",
-    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs",
+    "docs:check": "npm run docs:lint && node --experimental-strip-types scripts/docs-check.mjs",
+    "docs:check:fast": "npm run docs:lint && node --experimental-strip-types scripts/docs-check.mjs --fast",
+    "docs:lint": "markdownlint-cli2",
+    "docs:reference": "node --experimental-strip-types scripts/reference-gen.mjs",
+    "docs:reference:check": "node --experimental-strip-types scripts/reference-check.mjs",
+    "docs:media": "bash scripts/docs-media.sh",
+    "docs:media:check": "node scripts/docs-media-check.mjs",
+    "docs:site": "vitepress dev docs",
+    "docs:site:check": "node scripts/docs-site-check.mjs",
+    "docs:site:anchors": "node scripts/docs-site-anchors.mjs",
+    "docs:site:build": "node scripts/docs-site-check.mjs && vitepress build docs && node scripts/docs-site-artifacts.mjs && node scripts/docs-site-anchors.mjs",
+    "docs:site:preview": "vitepress preview docs",
     "backup": "node scripts/backup.mjs",
     "test:install:rc": "bash scripts/live-install-check.sh",
     "data": "node --experimental-strip-types src/v2/data-cli.ts"
@@ -92,7 +104,12 @@
     "@babel/preset-typescript": "7.27.1",
     "@opencode/plugin": "2.2.1",
     "@types/node": "26.6.6",
+    "asciinema-player": "3.18.1",
     "babel-preset-solid": "1.9.12",
-    "typescript": "7.0.2"
+    "markdownlint-cli2": "0.24.1",
+    "mermaid": "11.17.2",
+    "typescript": "7.0.2",
+    "vitepress": "1.6.4",
+    "vitepress-plugin-mermaid": "2.0.17"
   }
 }
