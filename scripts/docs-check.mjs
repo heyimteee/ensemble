@@ -8,7 +8,8 @@
  *
  * The check is intentionally version-scoped, not a prose style linter: a stale
  * current claim is an error; historical records and version-scoped evidence are
- * left alone.
+ * left alone. User navigation is checked separately from the evidence index:
+ * current records live in docs/contributing/evidence.md, not the docs home.
  *
  * Usage:
  *   node --experimental-strip-types scripts/docs-check.mjs [--root DIR]
@@ -136,9 +137,10 @@ function checkWorkflow(root, path, failures) {
   return text
 }
 
+const EVIDENCE_INDEX = "docs/contributing/evidence.md"
+
 function checkVerificationIndex(root, failures) {
-  const indexPath = "docs/README.md"
-  const index = read(root, indexPath, failures)
+  const index = read(root, EVIDENCE_INDEX, failures)
   if (!index) return
   const directory = join(root, "docs", "verification")
   if (!existsSync(directory)) {
@@ -150,9 +152,57 @@ function checkVerificationIndex(root, failures) {
     const date = name.slice(0, 10)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < CURRENT_RECORD_FLOOR) continue
     if (!index.includes(name)) {
-      failures.push(`${indexPath}: current verification record ${name} is not linked`)
+      failures.push(`${EVIDENCE_INDEX}: current verification record ${name} is not linked`)
     }
   }
+}
+
+const SECTION_INDEXES = [
+  "docs/getting-started/README.md",
+  "docs/concepts/README.md",
+  "docs/guides/README.md",
+  "docs/reference/README.md",
+  "docs/operations/README.md",
+  "docs/security/README.md",
+  "docs/privacy/README.md",
+  "docs/support/README.md",
+  "docs/contributing/README.md",
+]
+
+/**
+ * Ticket #302: the docs home is user navigation. Every section is reachable,
+ * the style guide and redirect map are part of the docs contract, and evidence
+ * (ADRs and verification records) is reached through the contributing hub.
+ */
+function checkDocsNavigation(root, failures) {
+  for (const path of [
+    ...SECTION_INDEXES,
+    EVIDENCE_INDEX,
+    "docs/style-guide.md",
+    "docs/redirects.md",
+  ]) {
+    if (!existsSync(join(root, path))) {
+      failures.push(`${path}: file is missing`)
+    }
+  }
+
+  const home = read(root, "docs/README.md", failures)
+  requireClaims(
+    "docs/README.md",
+    home,
+    [
+      ...SECTION_INDEXES.map((path) => path.replace(/^docs\//, "")),
+      "style-guide.md",
+      "redirects.md",
+    ],
+    failures,
+  )
+
+  const contributing = read(root, "docs/contributing/README.md", failures)
+  requireClaims("docs/contributing/README.md", contributing, ["evidence.md"], failures)
+
+  const evidence = read(root, EVIDENCE_INDEX, failures)
+  requireClaims(EVIDENCE_INDEX, evidence, ["adr/README.md", "verification/"], failures)
 }
 
 const SUPPORT_DOCS = [
@@ -350,6 +400,7 @@ function checkDocs(root = REPO_ROOT) {
     requireClaims("README.md", readme, [`Node ${liveNode}`], failures)
   }
 
+  checkDocsNavigation(root, failures)
   checkVerificationIndex(root, failures)
   checkSupport(root, failures)
 
@@ -361,8 +412,9 @@ if (help) {
   console.log(`Usage: node --experimental-strip-types scripts/docs-check.mjs [--root DIR]
 
 Asserts that the current docs match the canonical contract, host, and Node
-versions, and that every verification record from ${CURRENT_RECORD_FLOOR} onward is
-linked from docs/README.md. Exits 1 on any stale or missing claim.`)
+versions, that the user navigation exposes every docs section, and that every
+verification record from ${CURRENT_RECORD_FLOOR} onward is linked from
+${EVIDENCE_INDEX}. Exits 1 on any stale or missing claim.`)
 } else {
   try {
     const args = parseArgs(process.argv.slice(2))

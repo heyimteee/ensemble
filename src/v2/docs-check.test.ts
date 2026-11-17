@@ -14,12 +14,7 @@ const COPIED_PATHS = [
   "README.md",
   "LICENSE",
   "scripts/README.md",
-  "docs/README.md",
-  "docs/implementation.md",
-  "docs/adr/0011-mention-routing-and-budgets.md",
-  "docs/compatibility/opencode-host-range.md",
-  "docs/support",
-  "docs/verification",
+  "docs",
   ".github/ISSUE_TEMPLATE",
   ".github/PULL_REQUEST_TEMPLATE.md",
   ".github/workflows/verify.yml",
@@ -53,6 +48,10 @@ function replaceAll(root: string, path: string, from: string, to: string): void 
   const text = read(root, path)
   assert.ok(text.includes(from), `${path} must contain ${JSON.stringify(from)} for the fixture`)
   write(root, path, text.replaceAll(from, to))
+}
+
+function append(root: string, path: string, text: string): void {
+  writeFileSync(join(root, path), `${read(root, path)}${text}`)
 }
 
 function run(root: string) {
@@ -209,14 +208,78 @@ test("docs-check rejects a missing LICENSE file", () => {
   }
 })
 
-test("docs-check rejects a current verification record missing from the index", () => {
+test("docs-check rejects a current verification record missing from the evidence index", () => {
   const root = fixtureRepo()
   try {
     write(root, "docs/verification/2026-11-13-unlinked.md", "# Unlinked\n")
     const result = run(root)
     assert.equal(result.status, 1)
     assert.match(result.stderr, /2026-11-13-unlinked\.md/)
-    assert.match(result.stderr, /docs\/README\.md/)
+    assert.match(result.stderr, /docs\/contributing\/evidence\.md/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check accepts a current verification record linked from the evidence index", () => {
+  const root = fixtureRepo()
+  try {
+    write(root, "docs/verification/2026-11-13-linked.md", "# Linked\n")
+    append(
+      root,
+      "docs/contributing/evidence.md",
+      "\n- [Linked record](verification/2026-11-13-linked.md)\n",
+    )
+    const result = run(root)
+    assert.equal(result.status, 0, result.stderr)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a docs home that drops a section index", () => {
+  const root = fixtureRepo()
+  try {
+    replaceAll(root, "docs/README.md", "getting-started/README.md", "getting-started.md")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /docs\/README\.md.*getting-started\/README\.md/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a contributing hub without the evidence index", () => {
+  const root = fixtureRepo()
+  try {
+    replaceAll(root, "docs/contributing/README.md", "evidence.md", "records.md")
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /docs\/contributing\/README\.md.*evidence\.md/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a missing documentation style guide", () => {
+  const root = fixtureRepo()
+  try {
+    rmSync(join(root, "docs/style-guide.md"))
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /docs\/style-guide\.md: file is missing/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a missing documentation redirect map", () => {
+  const root = fixtureRepo()
+  try {
+    rmSync(join(root, "docs/redirects.md"))
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /docs\/redirects\.md: file is missing/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
