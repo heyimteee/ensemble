@@ -132,6 +132,8 @@ Ensemble extends OpenCode's TUI with persistent agent teams. Keep changes within
 - Before changing the service registry, work recovery, or plugin lifecycle, read [ADR 0003](docs/adr/0003-single-service-and-safe-recovery.md).
 - Use patch/direct file edits; for necessary multi-site scripted edits, inspect a temporary script and run it once. See the guide's editing discipline.
 - Run `npm run verify` after source changes and before handoff; report live checks separately, including skips.
+- Work in the repository root for every ticket. Do not create per-ticket worktrees or sibling `ensemble-*` directories; switch branches in place.
+- When a checkout is removed, keep its branch. Removing a directory must not delete committed work.
 
 ## End-of-turn completion (server-owned, ticket #238)
 
