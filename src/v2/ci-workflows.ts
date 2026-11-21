@@ -279,8 +279,8 @@ export function checkVerifyWorkflow(text: string, supportedHosts: readonly strin
 export function checkNightlyWorkflow(text: string, supportedHosts: readonly string[]): string[] {
   const failures: string[] = []
   const file = "nightly.yml"
-  if (!/^\s+schedule:/m.test(text) || !/^\s+- cron:/m.test(text)) {
-    failures.push(`${file}: a nightly schedule trigger is missing`)
+  if (/^\s+schedule:/m.test(text) || /^\s+- cron:/m.test(text)) {
+    failures.push(`${file}: must not have a schedule trigger; run it manually`)
   }
   if (!/^\s+workflow_dispatch:/m.test(text)) {
     failures.push(`${file}: workflow_dispatch is missing`)
@@ -331,8 +331,8 @@ export function checkNightlyWorkflow(text: string, supportedHosts: readonly stri
   }
 
   // `test:live:latency` is intentionally shared: PRs run the generous smoke
-  // profile and nightly runs the strict reference profile. The duplicate job
-  // this ticket removes is the separate latency workflow, checked by
+  // profile; the manual live checks run the strict reference profile. The
+  // duplicate job this ticket removes is the separate latency workflow, checked by
   // `checkCiRepository`; the other deterministic suites stay PR-only.
   for (const suite of Object.values(PR_LIVE_SUITES).flat()) {
     if (suite === "test:live:latency") continue

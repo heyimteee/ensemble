@@ -1579,7 +1579,7 @@ export const MAINTAINER_COMMANDS = [
   ["docs:site:anchors", "Crawl the built VitePress HTML and validate every internal fragment target."],
   ["test:live:*", "Live, fake, install, latency, lifecycle, and subagent verification suites."],
   ["benchmark:*", "Tool-surface and synthesis benchmarks."],
-  ["soak", "The four-hour enforced fake-host soak gate; nightly or opt-in."],
+  ["soak", "The four-hour enforced fake-host soak gate; manual or opt-in."],
   ["soak:smoke", "The short observe-only soak smoke run."],
 ]
 

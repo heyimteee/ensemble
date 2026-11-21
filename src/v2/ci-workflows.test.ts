@@ -161,6 +161,15 @@ test("a nightly real-model job without the opt-in gate is rejected", () => {
   assert.ok(failuresMatching(failures, /real.*opt-in/).length > 0)
 })
 
+test("a nightly workflow with a schedule trigger is rejected", () => {
+  const text = read(nightlyWorkflowPath).replace(
+    "on:\n",
+    'on:\n  schedule:\n    - cron: "17 4 * * *"\n',
+  )
+  const failures = checkNightlyWorkflow(text, supported)
+  assert.ok(failuresMatching(failures, /schedule/).length > 0)
+})
+
 test("a nightly workflow triggered by pull requests is rejected", () => {
   const text = read(nightlyWorkflowPath).replace("on:\n", "on:\n  pull_request:\n")
   const failures = checkNightlyWorkflow(text, supported)

@@ -5,7 +5,7 @@ name: Verify
 # `live-fake` owns the long fake suites, `live-native` owns the native host
 # suites, `live-multilocation` owns the shared-service regression, and
 # `latency-smoke` keeps the PR latency threshold generous. The strict 50/250 ms
-# gate and the real-model suite live in nightly.yml.
+# gate and the real-model suite live in nightly.yml, run manually.
 
 on:
   push:
