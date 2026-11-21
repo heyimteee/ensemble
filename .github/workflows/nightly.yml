@@ -1,13 +1,15 @@
-name: Nightly
+name: Live checks (manual)
 
 # Ticket #261: the expensive, environment-sensitive checks are separate from
 # PR feedback. `latency-reference` is the strict 50/250 ms reference-host gate;
 # `real` is the real-model acceptance and only runs when opted in through the
 # `real` dispatch input or the repository variable ENSEMBLE_NIGHTLY_REAL=1.
+#
+# Manual only: the daily schedule was removed because it ran independently of
+# repository activity and produced unattended failures. Dispatch it when you
+# want the live checks.
 
 on:
-  schedule:
-    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       real:

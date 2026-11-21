@@ -269,7 +269,7 @@ quickstart 2 min, sizes 1 min, multilocation 1 min, the native suites under
 1 min, latency under 1 min). The `live-fake` timeout is 45 minutes to absorb a
 slower shared runner without letting one job hang indefinitely.
 
-### Nightly (`nightly.yml`)
+### Live checks (`nightly.yml`, manual)
 
 | Job | Suites | Timeout | Observed |
 | --- | --- | ---: | ---: |
@@ -277,11 +277,12 @@ slower shared runner without letting one job hang indefinitely.
 | `soak-smoke` | `npm run soak:smoke` (180 s observe-only record; the 4-hour gate is opt-in) | 20 min | ~4 min |
 | `real` | `test:live` with the real host catalog; opt-in via the `real` dispatch input or `ENSEMBLE_NIGHTLY_REAL=1` | 30 min | ~3 min |
 
-The schedule is `17 4 * * *`; `workflow_dispatch` allows a manual run. The
-real-model job is skipped unless opted in, so credentials and model cost stay
-controlled. Nightly wall-clock budget is 80 minutes with all jobs; the soak
-smoke record uploads even on success, and the full multi-hour gate remains a
-manual/opt-in run recorded in a verification record.
+The workflow is **manual-only** via `workflow_dispatch`; the daily schedule was
+removed because it ran independently of repository activity and produced
+unattended failures. The real-model job is skipped unless opted in, so
+credentials and model cost stay controlled. Wall-clock budget is 80 minutes
+with all jobs; the soak smoke record uploads even on success, and the full
+multi-hour gate remains a manual/opt-in run recorded in a verification record.
 
 ### Kept separate
 
@@ -294,7 +295,7 @@ and deploys the Pages artifact only from `main` once the Pages environment is
 enabled. `docs-rationale.yml` reports the docs update or `docs-not-needed`
 decision; it is advisory until a maintainer adds it to the main ruleset.
 The old `latency.yml` is removed: the smoke profile lives in `verify.yml` and
-the reference gate in `nightly.yml`. `src/v2/ci-workflows.ts`
+the reference gate lives in the manual `nightly.yml`. `src/v2/ci-workflows.ts`
 and its test assert this job graph, the suite ownership, the timeouts, the
 artifact uploads, the `ENSEMBLE_LIVE_REQUIRE=1` contract, the runtime build
 after dependency install, the trusted PR-guard shape, and the OpenCode pin.
