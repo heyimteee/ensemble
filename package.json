@@ -87,8 +87,8 @@
     "node": ">=22.23.4"
   },
   "dependencies": {
-    "@opentui/core": "0.7.0",
-    "@opentui/solid": "0.7.0",
+    "@opentui/core": "0.9.5",
+    "@opentui/solid": "0.9.5",
     "solid-js": "1.9.12"
   },
   "peerDependencies": {
